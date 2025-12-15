@@ -1714,7 +1714,13 @@ class SegmenterApp:
         ttk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=10)
     
     # Page management
-    def _add_page(self, page: PageTab):
+    def _add_page(self, page: PageTab, from_workspace: bool = False):
+        """Add a page to the notebook.
+        
+        Args:
+            page: The page to add
+            from_workspace: If True, don't auto-fit zoom (preserve loaded zoom level)
+        """
         self.pages[page.tab_id] = page
         
         # Create main frame with rulers
@@ -1811,8 +1817,13 @@ class SegmenterApp:
         self.current_page_id = page.tab_id
         self.workspace_modified = True
         
-        # Fit to screen after canvas is properly sized
-        self.root.after(300, lambda: (self._zoom_fit(), self._update_display(), self._draw_rulers(page)))
+        # Fit to screen after canvas is properly sized (only if not loading from workspace)
+        if from_workspace:
+            # Loading from workspace - just update display, don't change zoom
+            self.root.after(300, lambda: (self._update_display(), self._draw_rulers(page)))
+        else:
+            # New page - fit to screen
+            self.root.after(300, lambda: (self._zoom_fit(), self._update_display(), self._draw_rulers(page)))
     
     def _on_tab_changed(self, event):
         try:
@@ -3325,10 +3336,14 @@ class SegmenterApp:
         # Load global objects
         self.all_objects = data.objects if data.objects else []
         
+        # First pass: add all pages (this triggers delayed display updates)
         for page in data.pages:
-            self._add_page(page)
+            self._add_page(page, from_workspace=True)
+        
+        # Second pass: rebuild all masks AFTER pages are added
+        # This ensures masks exist before any display update happens
+        for page in data.pages:
             # ALWAYS rebuild combined masks to ensure they're initialized
-            # This is critical for flood fill to work correctly after load
             self._update_combined_text_mask(page)
             self._update_combined_hatch_mask(page)
             
@@ -3341,6 +3356,10 @@ class SegmenterApp:
             print(f"  hide_hatch={getattr(page, 'hide_hatching', False)}, "
                   f"hatch_mask={(hatch_mask.shape if hatch_mask is not None else None)}, "
                   f"mask_sum={np.sum(hatch_mask) if hatch_mask is not None else 0}")
+        
+        # CRITICAL: Invalidate renderer cache AFTER masks are built
+        # This forces re-render with correct masks when display updates
+        self.renderer.invalidate_cache()
         
         self._update_tree()  # Rebuild tree with loaded objects
         
@@ -3367,8 +3386,14 @@ class SegmenterApp:
                 if hasattr(page, 'scroll_x') and hasattr(page, 'scroll_y'):
                     page.canvas.xview_moveto(page.scroll_x)
                     page.canvas.yview_moveto(page.scroll_y)
+            # Update zoom display
+            if hasattr(self, 'zoom_label'):
+                zoom_text = f"{int(self.zoom_level * 100)}%"
+                self.zoom_label.config(text=zoom_text)
+            if hasattr(self, 'status_bar'):
+                self.status_bar.set_item_text("zoom", f"{int(self.zoom_level * 100)}%")
         
-        self.root.after(400, _final_refresh)
+        self.root.after(500, _final_refresh)  # Increased delay to ensure masks are ready
     
     def _export_image(self):
         page = self._get_current_page()
@@ -3418,14 +3443,28 @@ class SegmenterApp:
     
     def _get_view_state(self) -> dict:
         """Get current view state for workspace saving."""
+        # Get actual panel widths from paned window
+        sidebar_width = self.settings.sidebar_width
+        tree_width = self.settings.tree_width
+        
+        if hasattr(self, 'layout') and hasattr(self.layout, 'paned'):
+            try:
+                panes = self.layout.paned.panes()
+                if len(panes) >= 1:
+                    sidebar_width = self.layout.paned.panecget(panes[0], 'width')
+                if len(panes) >= 3:
+                    tree_width = self.layout.paned.panecget(panes[2], 'width')
+            except:
+                pass
+        
         return {
             "current_page_id": self.current_page_id,
             "zoom_level": self.zoom_level,
             "group_by": self.group_by_var.get() if hasattr(self, 'group_by_var') else "none",
             "show_labels": self.show_labels,
             "current_view": self.current_view_var.get() if hasattr(self, 'current_view_var') else "",
-            "sidebar_width": self.settings.sidebar_width,
-            "tree_width": self.settings.tree_width,
+            "sidebar_width": sidebar_width,
+            "tree_width": tree_width,
         }
     
     def _restore_view_state(self, view_state: dict):
@@ -3450,6 +3489,23 @@ class SegmenterApp:
         # Restore current view
         if hasattr(self, 'current_view_var'):
             self.current_view_var.set(view_state.get("current_view", ""))
+        
+        # Restore panel widths
+        sidebar_width = view_state.get("sidebar_width", self.settings.sidebar_width)
+        tree_width = view_state.get("tree_width", self.settings.tree_width)
+        self.settings.sidebar_width = sidebar_width
+        self.settings.tree_width = tree_width
+        
+        # Update paned window widths if layout exists
+        if hasattr(self, 'layout') and hasattr(self.layout, 'paned'):
+            try:
+                panes = self.layout.paned.panes()
+                if len(panes) >= 1:
+                    self.layout.paned.paneconfig(panes[0], width=sidebar_width)
+                if len(panes) >= 3:
+                    self.layout.paned.paneconfig(panes[2], width=tree_width)
+            except Exception as e:
+                print(f"Could not restore panel widths: {e}")
         
         # Restore current page (done after all pages loaded)
         target_page_id = view_state.get("current_page_id")

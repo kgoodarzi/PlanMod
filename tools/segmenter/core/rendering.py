@@ -169,6 +169,9 @@ class Renderer:
             pixels_hidden = np.sum(text_mask > 0)
             print(f"  _render_base: Hiding {pixels_hidden} text pixels")
             base_image[text_mask > 0] = [255, 255, 255]  # White in BGR
+            # DEBUG: Save masked base image to verify text is hidden
+            # import cv2 as cv_debug
+            # cv_debug.imwrite("DEBUG_base_after_text_hide.png", base_image)
         else:
             print(f"  _render_base: NO text_mask (mask={text_mask is not None})")
             
