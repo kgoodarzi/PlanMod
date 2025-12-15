@@ -2749,7 +2749,7 @@ class SegmenterApp:
         # Debug option
         if num_objects >= 1:
             menu.add_separator()
-            menu.add_command(label="🔍 Debug Redraw", command=self._debug_redraw_selected)
+            menu.add_command(label="Debug Redraw", command=self._debug_redraw_selected)
         
         # Show menu
         menu.tk_popup(event.x_root, event.y_root)
@@ -2836,7 +2836,7 @@ class SegmenterApp:
             print(f"  Overlap (object mask AND text mask): {overlap} pixels")
             
             if overlap > 0:
-                print(f"  ⚠️  WARNING: {overlap} pixels of text are INSIDE the object!")
+                print(f"  *** WARNING: {overlap} pixels of text are INSIDE the object! ***")
                 print(f"      These pixels should be WHITE in base image before overlay")
         else:
             print(f"\n  Text mask: None (hide_text may be False)")
