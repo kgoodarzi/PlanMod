@@ -186,7 +186,7 @@ class Renderer:
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
         
         # Render each object's elements
-        # Fill INTERNAL holes using flood-fill-from-edges technique
+        # Grow object masks INTO hide_mask areas to fill gaps caused by text/hatch
         has_hide_mask = np.any(hide_mask > 0)
         
         for obj in objects:
@@ -204,36 +204,28 @@ class Renderer:
                     if elem.mask is not None and elem.mask.shape == (h, w):
                         obj_mask = np.maximum(obj_mask, elem.mask)
             
-            # Fill internal holes using "imfill" technique (flood fill from edges)
+            # Grow object mask into adjacent hide_mask pixels (constrained dilation)
+            # This fills gaps between fragments that were caused by text/hatch
             if has_hide_mask and np.any(obj_mask > 0):
-                # Create a barrier mask: object pixels block flood fill
-                # Start with all pixels as "potentially inside" (255)
-                # Object pixels are barriers (0)
-                # Flood fill from edges marks "definitely outside" (0)
-                # What remains as 255 after flood fill = internal holes
+                # Iteratively dilate the mask, but ONLY into hide_mask pixels
+                # This connects fragments separated by text/hatch
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                grown_mask = obj_mask.copy()
                 
-                # Pad the mask to ensure flood fill can reach all edges
-                padded = np.pad(obj_mask, 1, mode='constant', constant_values=0)
+                # Iterate until no more growth (max 50 iterations for safety)
+                for _ in range(50):
+                    # Dilate by 1 pixel
+                    dilated = cv2.dilate(grown_mask, kernel, iterations=1)
+                    
+                    # Only keep new pixels that are in hide_mask
+                    new_pixels = (dilated > 0) & (grown_mask == 0) & (hide_mask > 0)
+                    
+                    if not np.any(new_pixels):
+                        break  # No more growth possible
+                    
+                    grown_mask[new_pixels] = 255
                 
-                # Invert: barriers become 255, empty space becomes 0
-                inverted = 255 - padded
-                
-                # Flood fill from corner (0,0) - marks all exterior pixels
-                flood_mask = inverted.copy()
-                cv2.floodFill(flood_mask, None, (0, 0), 128)
-                
-                # Internal holes = pixels that are still 255 (not reached by flood fill)
-                # and were not part of original object
-                internal_holes = (flood_mask == 255)
-                
-                # Remove padding
-                internal_holes = internal_holes[1:-1, 1:-1]
-                
-                # Only fill holes that are in the hide_mask (text/hatch areas)
-                holes_to_fill = internal_holes & (hide_mask > 0)
-                
-                # Add these holes to the object mask
-                obj_mask[holes_to_fill] = 255
+                obj_mask = grown_mask
             
             # Apply to overlay
             mask_region = obj_mask > 0
