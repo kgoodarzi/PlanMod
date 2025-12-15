@@ -3587,11 +3587,14 @@ class SegmenterApp:
             try:
                 panes = self.layout.paned.panes()
                 if len(panes) >= 1:
-                    sidebar_width = self.layout.paned.panecget(panes[0], 'width')
+                    w = self.layout.paned.panecget(panes[0], 'width')
+                    sidebar_width = int(w) if w else sidebar_width
                 if len(panes) >= 3:
-                    tree_width = self.layout.paned.panecget(panes[2], 'width')
-            except:
-                pass
+                    w = self.layout.paned.panecget(panes[2], 'width')
+                    tree_width = int(w) if w else tree_width
+                print(f"_get_view_state: sidebar={sidebar_width}, tree={tree_width}")
+            except Exception as e:
+                print(f"Error getting panel widths: {e}")
         
         return {
             "current_page_id": self.current_page_id,
@@ -3636,6 +3639,7 @@ class SegmenterApp:
         if hasattr(self, 'layout') and hasattr(self.layout, 'paned'):
             try:
                 panes = self.layout.paned.panes()
+                print(f"_restore_view_state: Found {len(panes)} panes, setting sidebar={sidebar_width}, tree={tree_width}")
                 if len(panes) >= 1:
                     self.layout.paned.paneconfig(panes[0], width=sidebar_width)
                 if len(panes) >= 3:

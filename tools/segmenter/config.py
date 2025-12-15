@@ -58,7 +58,7 @@ class AppSettings:
     sidebar_visible: bool = True
     sidebar_collapsed: bool = False
     
-    tree_width: int = 280
+    tree_width: int = 260  # Same as sidebar by default
     tree_visible: bool = True
     tree_collapsed: bool = False
     

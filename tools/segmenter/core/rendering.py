@@ -186,7 +186,7 @@ class Renderer:
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
         
         # Render each object's elements
-        # If text/hatch is hidden, we need to fill holes in object masks
+        # If text/hatch is hidden, we need to fill INTERNAL holes in object masks
         # that were caused by text/hatch boundaries during flood fill
         has_hide_mask = np.any(hide_mask > 0)
         
@@ -205,19 +205,21 @@ class Renderer:
                     if elem.mask is not None and elem.mask.shape == (h, w):
                         obj_mask = np.maximum(obj_mask, elem.mask)
             
-            # If we have hidden text/hatch, fill holes in object mask
-            # Holes are areas where: hide_mask is set AND it's "inside" the object
+            # If we have hidden text/hatch, fill ONLY internal holes
+            # Use flood fill from edges to find external area, then fill internal holes
             if has_hide_mask and np.any(obj_mask > 0):
-                # Use morphological closing to fill small holes
-                # Then intersect with hide_mask to only fill text/hatch areas
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-                closed_mask = cv2.morphologyEx(obj_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
-                
-                # Find holes that should be filled: closed mask has it, original doesn't, hide_mask has it
-                holes_to_fill = (closed_mask > 0) & (obj_mask == 0) & (hide_mask > 0)
-                
-                # Expand the object mask to include these holes
-                obj_mask[holes_to_fill] = 255
+                # Find the convex hull or filled contour of the object
+                contours, _ = cv2.findContours(obj_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if contours:
+                    # Create filled version of object (fills internal holes)
+                    filled_mask = np.zeros((h, w), dtype=np.uint8)
+                    cv2.drawContours(filled_mask, contours, -1, 255, cv2.FILLED)
+                    
+                    # Internal holes = filled_mask has it, obj_mask doesn't, AND hide_mask has it
+                    internal_holes = (filled_mask > 0) & (obj_mask == 0) & (hide_mask > 0)
+                    
+                    # Fill only internal holes that are text/hatch
+                    obj_mask[internal_holes] = 255
             
             # Apply to overlay
             mask_region = obj_mask > 0
