@@ -1,6 +1,6 @@
 {
   "version": "5.0",
-  "timestamp": "2025-12-15T12:58:18.770311",
+  "timestamp": "2025-12-15T13:48:47.460825",
   "categories": {
     "planform": {
       "name": "planform",
@@ -234157,7 +234157,7 @@
     "zoom_level": 0.6456410256410257,
     "group_by": "none",
     "show_labels": true,
-    "current_view": "",
+    "current_view": "grouped",
     "sidebar_width": 280,
     "tree_width": 280
   }
