@@ -1,0 +1,71 @@
+# PlanMod Docker Compose Configuration
+# For local development and testing
+
+version: '3.8'
+
+services:
+  # Backend API
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - PLANMOD_AWS__REGION=${AWS_REGION:-us-east-1}
+      - PLANMOD_AWS__PROFILE=${AWS_PROFILE:-default}
+      - PLANMOD_DEPLOYMENT__ENVIRONMENT=dev
+      - PLANMOD_LOCAL__DEBUG=true
+      - PLANMOD_LOCAL__USE_LOCALSTACK=${USE_LOCALSTACK:-false}
+      - PLANMOD_LOCAL__LOCALSTACK_ENDPOINT=http://localstack:4566
+    volumes:
+      - ./backend:/app/backend:ro
+      - ./infrastructure/config:/app/infrastructure/config:ro
+      - ~/.aws:/root/.aws:ro  # AWS credentials
+    depends_on:
+      - localstack
+    networks:
+      - planmod-network
+    restart: unless-stopped
+
+  # Frontend (development)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    volumes:
+      - ./frontend/src:/app/src:ro
+      - ./frontend/public:/app/public:ro
+    depends_on:
+      - backend
+    networks:
+      - planmod-network
+
+  # LocalStack (AWS emulation for local development)
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3,dynamodb,lambda,stepfunctions,apigateway
+      - DEBUG=1
+      - DATA_DIR=/var/lib/localstack/data
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - localstack-data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - planmod-network
+
+networks:
+  planmod-network:
+    driver: bridge
+
+volumes:
+  localstack-data:
+
+
