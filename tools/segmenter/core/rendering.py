@@ -227,7 +227,8 @@ class Renderer:
                 
                 # Step 2: Additional fill based on fragmentation level
                 if is_highly_fragmented:
-                    # Aggressive: use convex hull for highly fragmented objects
+                    # Aggressive: use convex hull ONLY for highly fragmented objects
+                    # This handles cases where fragments are far apart (sparse hatch)
                     contours, _ = cv2.findContours(grown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     if contours:
                         all_points = np.vstack(contours)
@@ -235,12 +236,9 @@ class Renderer:
                         hull_mask = np.zeros((h, w), dtype=np.uint8)
                         cv2.drawContours(hull_mask, [hull], -1, 255, cv2.FILLED)
                         
-                        # Use larger closing kernel to bridge bigger gaps
-                        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
-                        closed_mask = cv2.morphologyEx(grown_mask, cv2.MORPH_CLOSE, kernel_close)
-                        
-                        # Fill where: inside hull AND inside closed boundary
-                        fill_area = (hull_mask > 0) & (closed_mask > 0) & (grown_mask == 0)
+                        # Fill entire convex hull - fragments define the boundary
+                        # No closing requirement - hull is bounded by fragment positions
+                        fill_area = (hull_mask > 0) & (grown_mask == 0)
                         grown_mask[fill_area] = 255
                 else:
                     # Check current fragmentation after dilation
