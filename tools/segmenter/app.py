@@ -3642,17 +3642,26 @@ class SegmenterApp:
         self.settings.sidebar_width = sidebar_width
         self.settings.tree_width = tree_width
         
-        # Update paned window widths if layout exists
+        # Update paned window widths using sash positions (more reliable than paneconfig)
         if hasattr(self, 'layout') and hasattr(self.layout, 'paned'):
-            try:
-                panes = self.layout.paned.panes()
-                print(f"_restore_view_state: Found {len(panes)} panes, setting sidebar={sidebar_width}, tree={tree_width}")
-                if len(panes) >= 1:
-                    self.layout.paned.paneconfig(panes[0], width=sidebar_width)
-                if len(panes) >= 3:
-                    self.layout.paned.paneconfig(panes[2], width=tree_width)
-            except Exception as e:
-                print(f"Could not restore panel widths: {e}")
+            def _apply_sash_positions():
+                try:
+                    paned = self.layout.paned
+                    total_width = paned.winfo_width()
+                    sash_count = len(paned.panes()) - 1
+                    
+                    print(f"_restore_view_state: total={total_width}, sash_count={sash_count}, sidebar={sidebar_width}, tree={tree_width}")
+                    
+                    if total_width > 0 and sash_count >= 2:
+                        # Sash 0: after sidebar
+                        paned.sash_place(0, sidebar_width, 0)
+                        # Sash 1: before tree panel (from right edge)
+                        paned.sash_place(1, total_width - tree_width, 0)
+                except Exception as e:
+                    print(f"Could not restore panel widths: {e}")
+            
+            # Schedule after UI is ready
+            self.root.after(100, _apply_sash_positions)
         
         # Restore current page (done after all pages loaded)
         target_page_id = view_state.get("current_page_id")
