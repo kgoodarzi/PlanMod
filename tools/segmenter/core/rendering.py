@@ -97,14 +97,20 @@ class Renderer:
         selected_element_ids = selected_element_ids or set()
         pending_elements = pending_elements or []
         objects = objects if objects is not None else page.objects
-        has_text_mask = text_mask is not None
-        has_hatching_mask = hatching_mask is not None
         
         h, w = page.original_image.shape[:2]
         
-        # Check if we need to rebuild base image (include all view options in hash)
+        # Compute mask hashes to detect when mask content changes
+        text_mask_hash = ""
+        hatching_mask_hash = ""
+        if text_mask is not None and text_mask.shape == (h, w):
+            text_mask_hash = str(np.sum(text_mask))  # Simple checksum
+        if hatching_mask is not None and hatching_mask.shape == (h, w):
+            hatching_mask_hash = str(np.sum(hatching_mask))
+        
+        # Check if we need to rebuild base image (include mask content in hash)
         current_hash = (self._compute_objects_hash_from_list(objects, categories, planform_opacity) + 
-                       str(hide_background) + str(has_text_mask) + str(has_hatching_mask))
+                       str(hide_background) + text_mask_hash + hatching_mask_hash)
         need_base_rebuild = (
             self.cache.base_image is None or 
             self.cache.base_hash != current_hash or
@@ -113,6 +119,9 @@ class Renderer:
         
         if need_base_rebuild:
             # Rebuild base image (expensive)
+            print(f"RENDER: Rebuilding base image for page {page.tab_id}")
+            print(f"  text_mask: {text_mask is not None}, hash={text_mask_hash}")
+            print(f"  hatching_mask: {hatching_mask is not None}, hash={hatching_mask_hash}")
             self.cache.base_image = self._render_base(page, categories, planform_opacity, hide_background, objects, text_mask, hatching_mask)
             self.cache.base_hash = current_hash
             self.cache.page_id = page.tab_id
@@ -157,8 +166,15 @@ class Renderer:
         base_image = page.original_image.copy()
         
         if text_mask is not None and text_mask.shape == (h, w):
+            pixels_hidden = np.sum(text_mask > 0)
+            print(f"  _render_base: Hiding {pixels_hidden} text pixels")
             base_image[text_mask > 0] = [255, 255, 255]  # White in BGR
+        else:
+            print(f"  _render_base: NO text_mask (mask={text_mask is not None})")
+            
         if hatching_mask is not None and hatching_mask.shape == (h, w):
+            pixels_hidden = np.sum(hatching_mask > 0)
+            print(f"  _render_base: Hiding {pixels_hidden} hatch pixels")
             base_image[hatching_mask > 0] = [255, 255, 255]  # White in BGR
         
         # Create segmentation overlay

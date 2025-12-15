@@ -2161,15 +2161,21 @@ class SegmenterApp:
         
         # Get text mask if hiding text (use combined mask if available)
         text_mask = None
-        if getattr(page, 'hide_text', False):
+        hide_text = getattr(page, 'hide_text', False)
+        if hide_text:
             if hasattr(page, 'combined_text_mask') and page.combined_text_mask is not None:
                 text_mask = page.combined_text_mask
+                print(f"_update_display: Using combined_text_mask with {np.sum(text_mask > 0)} pixels")
             elif hasattr(page, 'text_mask') and page.text_mask is not None:
                 text_mask = page.text_mask
+                print(f"_update_display: Using text_mask with {np.sum(text_mask > 0)} pixels")
+            else:
+                print(f"_update_display: hide_text=True but NO MASK FOUND!")
         
         # Get hatching mask if hiding hatching (use combined mask if available)
         hatching_mask = None
-        if getattr(page, 'hide_hatching', False):
+        hide_hatching = getattr(page, 'hide_hatching', False)
+        if hide_hatching:
             if hasattr(page, 'combined_hatch_mask') and page.combined_hatch_mask is not None:
                 hatching_mask = page.combined_hatch_mask
             elif hasattr(page, 'hatching_mask') and page.hatching_mask is not None:
