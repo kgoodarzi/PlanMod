@@ -2746,6 +2746,11 @@ class SegmenterApp:
             menu.add_separator()
             menu.add_command(label="Delete", command=self._delete_selected)
         
+        # Debug option
+        if num_objects >= 1:
+            menu.add_separator()
+            menu.add_command(label="🔍 Debug Redraw", command=self._debug_redraw_selected)
+        
         # Show menu
         menu.tk_popup(event.x_root, event.y_root)
     
@@ -2768,6 +2773,137 @@ class SegmenterApp:
         
         for item in self.object_tree.get_children():
             collapse_children(item)
+    
+    def _debug_redraw_selected(self):
+        """Debug: Redraw selected object with detailed logging."""
+        if not self.selected_object_ids:
+            print("DEBUG: No object selected")
+            return
+        
+        obj_id = next(iter(self.selected_object_ids))
+        obj = self._get_object_by_id(obj_id)
+        if not obj:
+            print(f"DEBUG: Object {obj_id} not found")
+            return
+        
+        page = self._get_current_page()
+        if not page:
+            print("DEBUG: No current page")
+            return
+        
+        print("=" * 60)
+        print(f"DEBUG REDRAW: Object '{obj.name}' (ID: {obj_id})")
+        print("=" * 60)
+        
+        # 1. Object info
+        print(f"  Category: {obj.category}")
+        print(f"  Instances: {len(obj.instances)}")
+        
+        total_mask_pixels = 0
+        for i, inst in enumerate(obj.instances):
+            print(f"  Instance {i+1}: {len(inst.elements)} elements")
+            for j, elem in enumerate(inst.elements):
+                if elem.mask is not None:
+                    mask_pixels = np.sum(elem.mask > 0)
+                    total_mask_pixels += mask_pixels
+                    print(f"    Element {j+1}: mode={elem.mode}, mask={elem.mask.shape}, pixels={mask_pixels}")
+                else:
+                    print(f"    Element {j+1}: mode={elem.mode}, mask=None")
+        
+        print(f"  Total object mask pixels: {total_mask_pixels}")
+        
+        # 2. Page state
+        h, w = page.original_image.shape[:2]
+        print(f"\n  Page: {page.display_name}")
+        print(f"  Image size: {w}x{h}")
+        print(f"  hide_text: {getattr(page, 'hide_text', False)}")
+        print(f"  hide_hatching: {getattr(page, 'hide_hatching', False)}")
+        
+        # 3. Text mask info
+        text_mask = getattr(page, 'combined_text_mask', None)
+        if text_mask is not None:
+            text_pixels = np.sum(text_mask > 0)
+            print(f"\n  Text mask: shape={text_mask.shape}, pixels={text_pixels}")
+            
+            # Check overlap between object mask and text mask
+            obj_mask = np.zeros((h, w), dtype=np.uint8)
+            for inst in obj.instances:
+                for elem in inst.elements:
+                    if elem.mask is not None and elem.mask.shape == (h, w):
+                        obj_mask = np.maximum(obj_mask, elem.mask)
+            
+            overlap = np.sum((obj_mask > 0) & (text_mask > 0))
+            print(f"  Overlap (object mask AND text mask): {overlap} pixels")
+            
+            if overlap > 0:
+                print(f"  ⚠️  WARNING: {overlap} pixels of text are INSIDE the object!")
+                print(f"      These pixels should be WHITE in base image before overlay")
+        else:
+            print(f"\n  Text mask: None (hide_text may be False)")
+        
+        # 4. Hatching mask info
+        hatch_mask = getattr(page, 'combined_hatch_mask', None)
+        if hatch_mask is not None:
+            hatch_pixels = np.sum(hatch_mask > 0)
+            print(f"\n  Hatch mask: shape={hatch_mask.shape}, pixels={hatch_pixels}")
+        
+        # 5. Force re-render
+        print(f"\n  Invalidating cache and forcing re-render...")
+        self.renderer.invalidate_cache()
+        
+        # Get masks for render
+        render_text_mask = text_mask if getattr(page, 'hide_text', False) else None
+        render_hatch_mask = hatch_mask if getattr(page, 'hide_hatching', False) else None
+        
+        print(f"  Rendering with:")
+        print(f"    text_mask: {render_text_mask is not None} ({np.sum(render_text_mask > 0) if render_text_mask is not None else 0} pixels)")
+        print(f"    hatch_mask: {render_hatch_mask is not None} ({np.sum(render_hatch_mask > 0) if render_hatch_mask is not None else 0} pixels)")
+        
+        self._update_display()
+        
+        # 6. Save debug images
+        print(f"\n  Saving debug images...")
+        try:
+            debug_dir = Path("debug_output")
+            debug_dir.mkdir(exist_ok=True)
+            
+            # Save original
+            cv2.imwrite(str(debug_dir / "1_original.png"), page.original_image)
+            
+            # Save text mask
+            if text_mask is not None:
+                cv2.imwrite(str(debug_dir / "2_text_mask.png"), text_mask)
+            
+            # Save object mask
+            obj_mask = np.zeros((h, w), dtype=np.uint8)
+            for inst in obj.instances:
+                for elem in inst.elements:
+                    if elem.mask is not None and elem.mask.shape == (h, w):
+                        obj_mask = np.maximum(obj_mask, elem.mask)
+            cv2.imwrite(str(debug_dir / "3_object_mask.png"), obj_mask)
+            
+            # Save base image with text hidden
+            base_with_text_hidden = page.original_image.copy()
+            if text_mask is not None and getattr(page, 'hide_text', False):
+                base_with_text_hidden[text_mask > 0] = [255, 255, 255]
+            cv2.imwrite(str(debug_dir / "4_base_text_hidden.png"), base_with_text_hidden)
+            
+            # Save overlap visualization
+            overlap_vis = page.original_image.copy()
+            if text_mask is not None:
+                # Highlight text mask in red
+                overlap_vis[text_mask > 0] = [0, 0, 255]
+            # Highlight object mask in green (over red where overlap)
+            overlap_vis[obj_mask > 0, 1] = 255
+            cv2.imwrite(str(debug_dir / "5_overlap_visualization.png"), overlap_vis)
+            
+            print(f"  Debug images saved to: {debug_dir.absolute()}")
+        except Exception as e:
+            print(f"  Error saving debug images: {e}")
+        
+        print("=" * 60)
+        print("DEBUG REDRAW COMPLETE")
+        print("=" * 60)
     
     def _separate_instances(self):
         """Separate selected instances into individual objects."""
