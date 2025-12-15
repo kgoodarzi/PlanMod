@@ -186,7 +186,7 @@ class Renderer:
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
         
         # Render each object's elements
-        # Fill holes ONLY where they're caused by hidden text/hatch
+        # Fill gaps caused by hidden text/hatch using morphological closing
         has_hide_mask = np.any(hide_mask > 0)
         
         for obj in objects:
@@ -204,23 +204,27 @@ class Renderer:
                     if elem.mask is not None and elem.mask.shape == (h, w):
                         obj_mask = np.maximum(obj_mask, elem.mask)
             
-            # Fill internal holes caused by text/hatch
+            # Fill gaps caused by text/hatch using morphological closing
             if has_hide_mask and np.any(obj_mask > 0):
-                # Find external contours and fill them to get "solid" object
-                contours, hierarchy = cv2.findContours(obj_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                # Step 1: Morphological closing to connect nearby fragments
+                # Use a kernel size that can bridge typical text/hatch gaps (~15-20 pixels)
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+                closed_mask = cv2.morphologyEx(obj_mask, cv2.MORPH_CLOSE, kernel)
+                
+                # Step 2: Find the filled contours of the closed shape
+                contours, _ = cv2.findContours(closed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 if contours:
-                    # Create filled version (fills ALL internal holes)
                     filled_mask = np.zeros((h, w), dtype=np.uint8)
                     cv2.drawContours(filled_mask, contours, -1, 255, cv2.FILLED)
                     
-                    # Holes = pixels in filled but not in original
-                    holes = (filled_mask > 0) & (obj_mask == 0)
+                    # Step 3: Only fill pixels that are BOTH:
+                    # - In the filled closed contour (potential fill area)
+                    # - In the hide_mask (text/hatch that should be hidden)
+                    # - NOT in original mask (actual gaps to fill)
+                    gaps_to_fill = (filled_mask > 0) & (obj_mask == 0) & (hide_mask > 0)
                     
-                    # Only fill holes that overlap with hide_mask (text/hatch areas)
-                    holes_to_fill = holes & (hide_mask > 0)
-                    
-                    # Add these holes to the object mask
-                    obj_mask[holes_to_fill] = 255
+                    # Add these gaps to the object mask
+                    obj_mask[gaps_to_fill] = 255
             
             # Apply to overlay
             mask_region = obj_mask > 0
