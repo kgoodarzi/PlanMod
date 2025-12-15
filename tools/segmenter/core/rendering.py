@@ -204,26 +204,39 @@ class Renderer:
                     if elem.mask is not None and elem.mask.shape == (h, w):
                         obj_mask = np.maximum(obj_mask, elem.mask)
             
-            # Grow object mask into adjacent hide_mask pixels (constrained dilation)
-            # This fills gaps between fragments that were caused by text/hatch
+            # Two-step approach to fill gaps caused by text/hatch:
+            # Step 1: Constrained dilation into hide_mask areas (connects through hatch)
+            # Step 2: Fill remaining internal gaps using convex hull
             if has_hide_mask and np.any(obj_mask > 0):
-                # Iteratively dilate the mask, but ONLY into hide_mask pixels
-                # This connects fragments separated by text/hatch
+                # Step 1: Grow into hide_mask pixels
                 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
                 grown_mask = obj_mask.copy()
                 
-                # Iterate until no more growth (max 50 iterations for safety)
-                for _ in range(50):
-                    # Dilate by 1 pixel
+                for _ in range(100):  # More iterations for larger gaps
                     dilated = cv2.dilate(grown_mask, kernel, iterations=1)
-                    
-                    # Only keep new pixels that are in hide_mask
                     new_pixels = (dilated > 0) & (grown_mask == 0) & (hide_mask > 0)
-                    
                     if not np.any(new_pixels):
-                        break  # No more growth possible
-                    
+                        break
                     grown_mask[new_pixels] = 255
+                
+                # Step 2: If object has multiple fragments, fill gaps using convex hull
+                # This handles areas inside the object that aren't in hide_mask
+                contours, _ = cv2.findContours(grown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if len(contours) > 1 or (len(contours) == 1 and cv2.contourArea(contours[0]) < np.sum(grown_mask > 0) * 0.8):
+                    # Multiple fragments or fragmented single contour - use convex hull
+                    all_points = np.vstack(contours)
+                    hull = cv2.convexHull(all_points)
+                    hull_mask = np.zeros((h, w), dtype=np.uint8)
+                    cv2.drawContours(hull_mask, [hull], -1, 255, cv2.FILLED)
+                    
+                    # Fill gaps: pixels inside hull but not in grown_mask
+                    # Only if they're also inside the "tight" boundary (morphological closing)
+                    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
+                    closed_mask = cv2.morphologyEx(grown_mask, cv2.MORPH_CLOSE, kernel_close)
+                    
+                    # Fill only where: inside hull AND inside closed boundary AND not already filled
+                    fill_area = (hull_mask > 0) & (closed_mask > 0) & (grown_mask == 0)
+                    grown_mask[fill_area] = 255
                 
                 obj_mask = grown_mask
             
