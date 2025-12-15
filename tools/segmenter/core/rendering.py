@@ -165,13 +165,14 @@ class Renderer:
         # This ensures text/hatch is invisible in ALL areas
         base_image = page.original_image.copy()
         
+        # Create combined hide mask (text + hatch)
+        hide_mask = np.zeros((h, w), dtype=np.uint8)
+        
         if text_mask is not None and text_mask.shape == (h, w):
             pixels_hidden = np.sum(text_mask > 0)
             print(f"  _render_base: Hiding {pixels_hidden} text pixels")
             base_image[text_mask > 0] = [255, 255, 255]  # White in BGR
-            # DEBUG: Save masked base image to verify text is hidden
-            # import cv2 as cv_debug
-            # cv_debug.imwrite("DEBUG_base_after_text_hide.png", base_image)
+            hide_mask = np.maximum(hide_mask, text_mask)
         else:
             print(f"  _render_base: NO text_mask (mask={text_mask is not None})")
             
@@ -179,11 +180,16 @@ class Renderer:
             pixels_hidden = np.sum(hatching_mask > 0)
             print(f"  _render_base: Hiding {pixels_hidden} hatch pixels")
             base_image[hatching_mask > 0] = [255, 255, 255]  # White in BGR
+            hide_mask = np.maximum(hide_mask, hatching_mask)
         
         # Create segmentation overlay
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
         
         # Render each object's elements
+        # If text/hatch is hidden, we need to fill holes in object masks
+        # that were caused by text/hatch boundaries during flood fill
+        has_hide_mask = np.any(hide_mask > 0)
+        
         for obj in objects:
             cat = categories.get(obj.category)
             if not cat or not cat.visible:
@@ -192,14 +198,33 @@ class Renderer:
             opacity = planform_opacity if obj.category == "planform" else 0.7
             alpha_val = int(255 * opacity)
             
+            # Collect all element masks for this object
+            obj_mask = np.zeros((h, w), dtype=np.uint8)
             for inst in obj.instances:
                 for elem in inst.elements:
                     if elem.mask is not None and elem.mask.shape == (h, w):
-                        mask_region = elem.mask > 0
-                        overlay[mask_region, 0] = cat.color_bgr[0]
-                        overlay[mask_region, 1] = cat.color_bgr[1]
-                        overlay[mask_region, 2] = cat.color_bgr[2]
-                        overlay[mask_region, 3] = alpha_val
+                        obj_mask = np.maximum(obj_mask, elem.mask)
+            
+            # If we have hidden text/hatch, fill holes in object mask
+            # Holes are areas where: hide_mask is set AND it's "inside" the object
+            if has_hide_mask and np.any(obj_mask > 0):
+                # Use morphological closing to fill small holes
+                # Then intersect with hide_mask to only fill text/hatch areas
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                closed_mask = cv2.morphologyEx(obj_mask, cv2.MORPH_CLOSE, kernel, iterations=3)
+                
+                # Find holes that should be filled: closed mask has it, original doesn't, hide_mask has it
+                holes_to_fill = (closed_mask > 0) & (obj_mask == 0) & (hide_mask > 0)
+                
+                # Expand the object mask to include these holes
+                obj_mask[holes_to_fill] = 255
+            
+            # Apply to overlay
+            mask_region = obj_mask > 0
+            overlay[mask_region, 0] = cat.color_bgr[0]
+            overlay[mask_region, 1] = cat.color_bgr[1]
+            overlay[mask_region, 2] = cat.color_bgr[2]
+            overlay[mask_region, 3] = alpha_val
         
         if hide_background:
             # Show only objects on white background
