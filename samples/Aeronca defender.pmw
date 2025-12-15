@@ -1,6 +1,6 @@
 {
   "version": "5.0",
-  "timestamp": "2025-12-15T12:25:49.073119",
+  "timestamp": "2025-12-15T12:33:29.085176",
   "categories": {
     "planform": {
       "name": "planform",
@@ -7197,9 +7197,9 @@
       "dpi": 150.0,
       "pdf_width_inches": 0.0,
       "pdf_height_inches": 0.0,
-      "zoom_level": 1.2610176282051282,
-      "scroll_x": 0.4116331096196868,
-      "scroll_y": 0.43289652056032535,
+      "zoom_level": 0.6456410256410257,
+      "scroll_x": 0.0,
+      "scroll_y": 0.0,
       "hide_background": false,
       "hide_text": true,
       "hide_hatching": true,
@@ -190570,7 +190570,7 @@
       "dpi": 150.0,
       "pdf_width_inches": 0.0,
       "pdf_height_inches": 0.0,
-      "zoom_level": 1.2610176282051282,
+      "zoom_level": 0.6456410256410257,
       "scroll_x": 0.0,
       "scroll_y": 0.0,
       "hide_background": false,
@@ -232631,7 +232631,7 @@
       "dpi": 150.0,
       "pdf_width_inches": 0.0,
       "pdf_height_inches": 0.0,
-      "zoom_level": 1.2610176282051282,
+      "zoom_level": 0.6456410256410257,
       "scroll_x": 0.0,
       "scroll_y": 0.0,
       "hide_background": false,
@@ -234154,7 +234154,7 @@
   ],
   "view_state": {
     "current_page_id": "25f028f4",
-    "zoom_level": 1.2610176282051282,
+    "zoom_level": 0.6456410256410257,
     "group_by": "none",
     "show_labels": true,
     "current_view": "",

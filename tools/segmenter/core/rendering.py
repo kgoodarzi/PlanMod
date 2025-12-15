@@ -186,8 +186,7 @@ class Renderer:
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
         
         # Render each object's elements
-        # NO hole filling - just render original masks
-        # But use FULL OPACITY where object overlaps with hidden text/hatch
+        # Fill holes ONLY where they're caused by hidden text/hatch
         has_hide_mask = np.any(hide_mask > 0)
         
         for obj in objects:
@@ -205,18 +204,30 @@ class Renderer:
                     if elem.mask is not None and elem.mask.shape == (h, w):
                         obj_mask = np.maximum(obj_mask, elem.mask)
             
-            # Apply to overlay - use original mask WITHOUT modification
+            # Fill internal holes caused by text/hatch
+            if has_hide_mask and np.any(obj_mask > 0):
+                # Find external contours and fill them to get "solid" object
+                contours, hierarchy = cv2.findContours(obj_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if contours:
+                    # Create filled version (fills ALL internal holes)
+                    filled_mask = np.zeros((h, w), dtype=np.uint8)
+                    cv2.drawContours(filled_mask, contours, -1, 255, cv2.FILLED)
+                    
+                    # Holes = pixels in filled but not in original
+                    holes = (filled_mask > 0) & (obj_mask == 0)
+                    
+                    # Only fill holes that overlap with hide_mask (text/hatch areas)
+                    holes_to_fill = holes & (hide_mask > 0)
+                    
+                    # Add these holes to the object mask
+                    obj_mask[holes_to_fill] = 255
+            
+            # Apply to overlay
             mask_region = obj_mask > 0
             overlay[mask_region, 0] = cat.color_bgr[0]
             overlay[mask_region, 1] = cat.color_bgr[1]
             overlay[mask_region, 2] = cat.color_bgr[2]
             overlay[mask_region, 3] = alpha_val
-            
-            # Where object overlaps with hidden text/hatch, use FULL opacity
-            # This ensures the white (hidden text/hatch) doesn't show through
-            if has_hide_mask:
-                overlap = mask_region & (hide_mask > 0)
-                overlay[overlap, 3] = 255  # Full opacity in overlap areas
         
         if hide_background:
             # Show only objects on white background

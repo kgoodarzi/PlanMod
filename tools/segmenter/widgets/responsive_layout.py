@@ -299,24 +299,24 @@ class ResizableLayout(tk.Frame):
     
     def finalize_layout(self):
         """Finalize layout after all panels are added."""
-        # Add frames to paned window
+        # Add frames to paned window with minimum sizes to prevent collapse
         if self.panels:
             # Check for left panels
             left_panels = [p for pid, p in self.panels.items() 
                           if self.panel_configs[pid].side == "left"]
             if left_panels:
-                self.paned.add(self.left_panel_frame, width=self.settings.sidebar_width)
+                self.paned.add(self.left_panel_frame, width=self.settings.sidebar_width, minsize=200)
                 for panel in left_panels:
                     panel.pack(fill=tk.BOTH, expand=True)
         
         # Always add center
-        self.paned.add(self.center_frame, stretch="always")
+        self.paned.add(self.center_frame, stretch="always", minsize=400)
         
         # Check for right panels
         right_panels = [p for pid, p in self.panels.items() 
                        if self.panel_configs[pid].side == "right"]
         if right_panels:
-            self.paned.add(self.right_panel_frame, width=self.settings.tree_width)
+            self.paned.add(self.right_panel_frame, width=self.settings.tree_width, minsize=200)
             for panel in right_panels:
                 panel.pack(fill=tk.BOTH, expand=True)
                 

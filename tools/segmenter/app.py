@@ -3642,26 +3642,29 @@ class SegmenterApp:
         self.settings.sidebar_width = sidebar_width
         self.settings.tree_width = tree_width
         
-        # Update paned window widths using sash positions (more reliable than paneconfig)
+        # Update paned window widths - use paneconfig with minsize to prevent collapse
         if hasattr(self, 'layout') and hasattr(self.layout, 'paned'):
-            def _apply_sash_positions():
+            def _apply_panel_widths():
                 try:
                     paned = self.layout.paned
-                    total_width = paned.winfo_width()
-                    sash_count = len(paned.panes()) - 1
+                    panes = paned.panes()
                     
-                    print(f"_restore_view_state: total={total_width}, sash_count={sash_count}, sidebar={sidebar_width}, tree={tree_width}")
+                    print(f"_restore_view_state: {len(panes)} panes, sidebar={sidebar_width}, tree={tree_width}")
                     
-                    if total_width > 0 and sash_count >= 2:
-                        # Sash 0: after sidebar
-                        paned.sash_place(0, sidebar_width, 0)
-                        # Sash 1: before tree panel (from right edge)
-                        paned.sash_place(1, total_width - tree_width, 0)
+                    if len(panes) >= 1:
+                        # Left panel (sidebar)
+                        paned.paneconfig(panes[0], width=sidebar_width, minsize=200)
+                    if len(panes) >= 3:
+                        # Right panel (tree)
+                        paned.paneconfig(panes[2], width=tree_width, minsize=200)
+                    
+                    # Force update
+                    paned.update_idletasks()
                 except Exception as e:
                     print(f"Could not restore panel widths: {e}")
             
-            # Schedule after UI is ready
-            self.root.after(100, _apply_sash_positions)
+            # Schedule after UI is ready - longer delay to ensure geometry is set
+            self.root.after(200, _apply_panel_widths)
         
         # Restore current page (done after all pages loaded)
         target_page_id = view_state.get("current_page_id")
