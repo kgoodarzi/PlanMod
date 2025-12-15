@@ -49,6 +49,8 @@ class AppSettings:
     # Window state
     window_width: int = 1400
     window_height: int = 900
+    window_x: int = 100
+    window_y: int = 100
     window_maximized: bool = False
     
     # Panel states

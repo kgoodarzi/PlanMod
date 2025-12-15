@@ -26,6 +26,7 @@ class WorkspaceData:
         self.objects: List[SegmentedObject] = []  # Global objects list
         self.version: str = ""
         self.timestamp: str = ""
+        self.view_state: dict = {}  # Current page, panel widths, etc.
 
 
 class WorkspaceManager:
@@ -49,7 +50,8 @@ class WorkspaceManager:
              path: str,
              pages: List[PageTab],
              categories: Dict[str, DynamicCategory],
-             objects: List[SegmentedObject] = None) -> bool:
+             objects: List[SegmentedObject] = None,
+             view_state: dict = None) -> bool:
         """
         Save workspace to file.
         
@@ -57,6 +59,7 @@ class WorkspaceManager:
             path: Path to .pmw file
             pages: List of pages to save
             categories: Category definitions
+            view_state: Optional dict with current_page_id, sidebar_width, etc.
             
         Returns:
             True if successful
@@ -64,6 +67,7 @@ class WorkspaceManager:
         try:
             workspace_dir = Path(path).parent
             objects = objects or []
+            view_state = view_state or {}
             
             data = {
                 "version": VERSION,
@@ -71,6 +75,7 @@ class WorkspaceManager:
                 "categories": self._serialize_categories(categories),
                 "objects": [self._serialize_object(obj) for obj in objects],
                 "pages": [],
+                "view_state": view_state,
             }
             
             for page in pages:
@@ -94,6 +99,10 @@ class WorkspaceManager:
                     "dpi": getattr(page, 'dpi', 150.0),
                     "pdf_width_inches": getattr(page, 'pdf_width_inches', 0.0),
                     "pdf_height_inches": getattr(page, 'pdf_height_inches', 0.0),
+                    # View state
+                    "zoom_level": getattr(page, 'zoom_level', 1.0),
+                    "scroll_x": getattr(page, 'scroll_x', 0.0),
+                    "scroll_y": getattr(page, 'scroll_y', 0.0),
                     # View settings
                     "hide_background": getattr(page, 'hide_background', False),
                     "hide_text": getattr(page, 'hide_text', False),
@@ -179,6 +188,11 @@ class WorkspaceManager:
                     objects=[],  # Objects are now global
                 )
                 
+                # Restore view state
+                page.zoom_level = page_data.get("zoom_level", 1.0)
+                page.scroll_x = page_data.get("scroll_x", 0.0)
+                page.scroll_y = page_data.get("scroll_y", 0.0)
+                
                 # Restore view settings
                 page.hide_background = page_data.get("hide_background", False)
                 page.hide_text = page_data.get("hide_text", False)
@@ -229,6 +243,9 @@ class WorkspaceManager:
                     obj = self._deserialize_object(obj_data, (h, w), image, result.categories, page_images)
                     if obj and obj.instances:
                         result.objects.append(obj)
+            
+            # Load view state (current page, panel widths, etc.)
+            result.view_state = data.get("view_state", {})
             
             return result
             

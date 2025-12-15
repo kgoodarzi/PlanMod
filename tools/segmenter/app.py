@@ -90,7 +90,11 @@ class SegmenterApp:
         # Create UI
         self.root = tk.Tk()
         self.root.title(f"PlanMod Segmenter v{VERSION}")
-        self.root.geometry(f"{self.settings.window_width}x{self.settings.window_height}")
+        # Restore window geometry including position
+        geometry = f"{self.settings.window_width}x{self.settings.window_height}"
+        if self.settings.window_x >= 0 and self.settings.window_y >= 0:
+            geometry += f"+{self.settings.window_x}+{self.settings.window_y}"
+        self.root.geometry(geometry)
         
         self._apply_theme()
         self._init_categories()
@@ -3243,7 +3247,19 @@ class SegmenterApp:
             self._save_workspace_as()
             return
         
-        if self.workspace_mgr.save(self.workspace_file, list(self.pages.values()), self.categories, self.all_objects):
+        # Collect view state
+        view_state = self._get_view_state()
+        
+        # Update page-level view state (zoom, scroll)
+        for page in self.pages.values():
+            page.zoom_level = self.zoom_level  # Current zoom
+            if hasattr(page, 'canvas'):
+                # Save scroll position
+                page.scroll_x = page.canvas.xview()[0]
+                page.scroll_y = page.canvas.yview()[0]
+        
+        if self.workspace_mgr.save(self.workspace_file, list(self.pages.values()), 
+                                   self.categories, self.all_objects, view_state):
             self.workspace_modified = False
             self.status_var.set(f"Saved: {Path(self.workspace_file).name}")
     
@@ -3329,6 +3345,10 @@ class SegmenterApp:
         self.workspace_modified = False
         self.status_var.set(f"Loaded: {Path(path).name}")
         
+        # Restore view state (current page, zoom, etc.)
+        if data.view_state:
+            self._restore_view_state(data.view_state)
+        
         # Force a small delay to ensure all UI is settled, then redraw
         def _final_refresh():
             self.renderer.invalidate_cache()
@@ -3337,6 +3357,10 @@ class SegmenterApp:
             page = self._get_current_page()
             if page:
                 self._draw_rulers(page)
+                # Restore scroll position if available
+                if hasattr(page, 'scroll_x') and hasattr(page, 'scroll_y'):
+                    page.canvas.xview_moveto(page.scroll_x)
+                    page.canvas.yview_moveto(page.scroll_y)
         
         self.root.after(400, _final_refresh)
     
@@ -3386,6 +3410,46 @@ class SegmenterApp:
             self.workspace_modified = True
             self.status_var.set(f"Added {len(result)} categories")
     
+    def _get_view_state(self) -> dict:
+        """Get current view state for workspace saving."""
+        return {
+            "current_page_id": self.current_page_id,
+            "zoom_level": self.zoom_level,
+            "group_by": self.group_by_var.get() if hasattr(self, 'group_by_var') else "none",
+            "show_labels": self.show_labels,
+            "current_view": self.current_view_var.get() if hasattr(self, 'current_view_var') else "",
+            "sidebar_width": self.settings.sidebar_width,
+            "tree_width": self.settings.tree_width,
+        }
+    
+    def _restore_view_state(self, view_state: dict):
+        """Restore view state from loaded workspace."""
+        if not view_state:
+            return
+        
+        # Restore zoom level
+        self.zoom_level = view_state.get("zoom_level", 1.0)
+        if hasattr(self, 'zoom_var'):
+            self.zoom_var.set(f"{int(self.zoom_level * 100)}%")
+        
+        # Restore group by
+        if hasattr(self, 'group_by_var'):
+            self.group_by_var.set(view_state.get("group_by", "none"))
+        
+        # Restore show labels
+        self.show_labels = view_state.get("show_labels", True)
+        if hasattr(self, 'show_labels_var'):
+            self.show_labels_var.set(self.show_labels)
+        
+        # Restore current view
+        if hasattr(self, 'current_view_var'):
+            self.current_view_var.set(view_state.get("current_view", ""))
+        
+        # Restore current page (done after all pages loaded)
+        target_page_id = view_state.get("current_page_id")
+        if target_page_id and target_page_id in self.pages:
+            self._switch_to_page(target_page_id)
+    
     def _on_close(self):
         if self.workspace_modified:
             r = messagebox.askyesnocancel("Save?", "Save workspace before closing?")
@@ -3394,8 +3458,11 @@ class SegmenterApp:
             if r:
                 self._save_workspace()
         
+        # Save window geometry
         self.settings.window_width = self.root.winfo_width()
         self.settings.window_height = self.root.winfo_height()
+        self.settings.window_x = self.root.winfo_x()
+        self.settings.window_y = self.root.winfo_y()
         save_settings(self.settings)
         self.root.quit()
     

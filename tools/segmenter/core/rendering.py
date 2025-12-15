@@ -152,19 +152,17 @@ class Renderer:
         h, w = page.original_image.shape[:2]
         objects = objects if objects is not None else page.objects
         
-        # Create combined hide mask (areas that should be white)
-        hide_mask = np.zeros((h, w), dtype=np.uint8)
-        if text_mask is not None and text_mask.shape == (h, w):
-            hide_mask = np.maximum(hide_mask, text_mask)
-        if hatching_mask is not None and hatching_mask.shape == (h, w):
-            hide_mask = np.maximum(hide_mask, hatching_mask)
-        
-        # Start with original image
+        # Start with original image and ALWAYS hide text/hatching first
+        # This ensures text/hatch is invisible in ALL areas
         base_image = page.original_image.copy()
         
-        # Create segmentation overlay and track where objects are drawn
+        if text_mask is not None and text_mask.shape == (h, w):
+            base_image[text_mask > 0] = [255, 255, 255]  # White in BGR
+        if hatching_mask is not None and hatching_mask.shape == (h, w):
+            base_image[hatching_mask > 0] = [255, 255, 255]  # White in BGR
+        
+        # Create segmentation overlay
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
-        object_mask = np.zeros((h, w), dtype=np.uint8)  # Track where objects exist
         
         # Render each object's elements
         for obj in objects:
@@ -183,28 +181,21 @@ class Renderer:
                         overlay[mask_region, 1] = cat.color_bgr[1]
                         overlay[mask_region, 2] = cat.color_bgr[2]
                         overlay[mask_region, 3] = alpha_val
-                        object_mask[mask_region] = 255
-        
-        # Apply text/hatching hiding ONLY to areas NOT covered by objects
-        # This prevents white "text ghosts" from showing through object fills
-        if np.any(hide_mask > 0):
-            # Areas to hide: hide_mask is set BUT object_mask is NOT set
-            hide_only_background = (hide_mask > 0) & (object_mask == 0)
-            base_image[hide_only_background] = [255, 255, 255]  # White in BGR
         
         if hide_background:
             # Show only objects on white background
             background = np.ones((h, w, 4), dtype=np.uint8) * 255  # White BGRA
             alpha = overlay[:, :, 3:4] / 255.0
-            # Full color where mask exists, white elsewhere
             blended = (background * (1 - alpha) + overlay * alpha).astype(np.uint8)
             blended[:, :, 3] = 255  # Full opacity
         else:
-            # Blend with base image (original with text optionally hidden)
+            # Blend overlay onto base image (which already has text/hatch hidden)
             base_rgba = cv2.cvtColor(base_image, cv2.COLOR_BGR2BGRA)
             alpha = overlay[:, :, 3:4] / 255.0
-            blended = (base_rgba * (1 - alpha * 0.5) + 
-                       overlay * alpha * 0.5).astype(np.uint8)
+            # Use proper alpha blending - overlay on top of base
+            blended = (base_rgba * (1 - alpha) + overlay * alpha).astype(np.uint8)
+            # Where no overlay, show base; where overlay, blend properly
+            blended[:, :, 3] = 255  # Full opacity for final image
         
         return blended
     
