@@ -2832,11 +2832,11 @@ class SegmenterApp:
                     if elem.mask is not None and elem.mask.shape == (h, w):
                         obj_mask = np.maximum(obj_mask, elem.mask)
             
-            overlap = np.sum((obj_mask > 0) & (text_mask > 0))
-            print(f"  Overlap (object mask AND text mask): {overlap} pixels")
+            text_overlap = np.sum((obj_mask > 0) & (text_mask > 0))
+            print(f"  Overlap (object mask AND text mask): {text_overlap} pixels")
             
-            if overlap > 0:
-                print(f"  *** WARNING: {overlap} pixels of text are INSIDE the object! ***")
+            if text_overlap > 0:
+                print(f"  *** WARNING: {text_overlap} pixels of text are INSIDE the object! ***")
                 print(f"      These pixels should be WHITE in base image before overlay")
         else:
             print(f"\n  Text mask: None (hide_text may be False)")
@@ -2846,6 +2846,13 @@ class SegmenterApp:
         if hatch_mask is not None:
             hatch_pixels = np.sum(hatch_mask > 0)
             print(f"\n  Hatch mask: shape={hatch_mask.shape}, pixels={hatch_pixels}")
+            
+            # Check hatch overlap
+            hatch_overlap = np.sum((obj_mask > 0) & (hatch_mask > 0))
+            print(f"  Overlap (object mask AND hatch mask): {hatch_overlap} pixels")
+            
+            if hatch_overlap > 0:
+                print(f"  *** WARNING: {hatch_overlap} pixels of hatch are INSIDE the object! ***")
         
         # 5. Force re-render
         print(f"\n  Invalidating cache and forcing re-render...")

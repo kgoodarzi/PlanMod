@@ -205,21 +205,27 @@ class Renderer:
                     if elem.mask is not None and elem.mask.shape == (h, w):
                         obj_mask = np.maximum(obj_mask, elem.mask)
             
-            # If we have hidden text/hatch, fill ONLY internal holes
-            # Use flood fill from edges to find external area, then fill internal holes
+            # If we have hidden text/hatch, fill holes using CONVEX HULL
+            # This handles fragmented objects (multiple small pieces) correctly
             if has_hide_mask and np.any(obj_mask > 0):
-                # Find the convex hull or filled contour of the object
+                # Find all contours (including from fragmented pieces)
                 contours, _ = cv2.findContours(obj_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 if contours:
-                    # Create filled version of object (fills internal holes)
-                    filled_mask = np.zeros((h, w), dtype=np.uint8)
-                    cv2.drawContours(filled_mask, contours, -1, 255, cv2.FILLED)
+                    # Combine all contour points
+                    all_points = np.vstack(contours)
                     
-                    # Internal holes = filled_mask has it, obj_mask doesn't, AND hide_mask has it
-                    internal_holes = (filled_mask > 0) & (obj_mask == 0) & (hide_mask > 0)
+                    # Create convex hull of ALL points (covers the entire object region)
+                    hull = cv2.convexHull(all_points)
                     
-                    # Fill only internal holes that are text/hatch
-                    obj_mask[internal_holes] = 255
+                    # Create filled convex hull mask
+                    hull_mask = np.zeros((h, w), dtype=np.uint8)
+                    cv2.drawContours(hull_mask, [hull], -1, 255, cv2.FILLED)
+                    
+                    # Holes to fill = inside hull, NOT in original mask, AND in hide_mask
+                    holes_to_fill = (hull_mask > 0) & (obj_mask == 0) & (hide_mask > 0)
+                    
+                    # Fill the holes
+                    obj_mask[holes_to_fill] = 255
             
             # Apply to overlay
             mask_region = obj_mask > 0

@@ -1,6 +1,6 @@
 {
   "version": "5.0",
-  "timestamp": "2025-12-15T12:00:47.493005",
+  "timestamp": "2025-12-15T12:20:13.322150",
   "categories": {
     "planform": {
       "name": "planform",
@@ -7198,8 +7198,8 @@
       "pdf_width_inches": 0.0,
       "pdf_height_inches": 0.0,
       "zoom_level": 1.2610176282051282,
-      "scroll_x": 0.0,
-      "scroll_y": 0.43289652056032535,
+      "scroll_x": 0.4365612016618728,
+      "scroll_y": 0.3176683235427022,
       "hide_background": false,
       "hide_text": true,
       "hide_hatching": true,
