@@ -204,9 +204,16 @@ class Renderer:
                     if elem.mask is not None and elem.mask.shape == (h, w):
                         obj_mask = np.maximum(obj_mask, elem.mask)
             
-            # Fill gaps caused by text/hatch using constrained dilation
-            # Only use aggressive filling for truly fragmented objects
+            # Fill gaps caused by text/hatch
             if has_hide_mask and np.any(obj_mask > 0):
+                # Check fragmentation BEFORE dilation (original state)
+                orig_contours, _ = cv2.findContours(obj_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                orig_fragment_count = len(orig_contours)
+                orig_small_frags = sum(1 for c in orig_contours if cv2.contourArea(c) < 2000)
+                
+                # Determine if this is a highly fragmented object
+                is_highly_fragmented = orig_fragment_count >= 5 or orig_small_frags >= 3
+                
                 # Step 1: Constrained dilation into hide_mask pixels
                 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
                 grown_mask = obj_mask.copy()
@@ -218,36 +225,32 @@ class Renderer:
                         break
                     grown_mask[new_pixels] = 255
                 
-                # Check fragmentation level
-                contours, _ = cv2.findContours(grown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                
-                # Count small fragments (< 2000 pixels each)
-                small_fragments = sum(1 for c in contours if cv2.contourArea(c) < 2000)
-                total_fragments = len(contours)
-                
-                # Only use aggressive fill for HIGHLY fragmented objects
-                # (5+ fragments OR 3+ small fragments)
-                if total_fragments >= 5 or small_fragments >= 3:
+                # Step 2: Additional fill based on fragmentation level
+                if is_highly_fragmented:
                     # Aggressive: use convex hull for highly fragmented objects
-                    all_points = np.vstack(contours)
-                    hull = cv2.convexHull(all_points)
-                    hull_mask = np.zeros((h, w), dtype=np.uint8)
-                    cv2.drawContours(hull_mask, [hull], -1, 255, cv2.FILLED)
-                    
-                    # Also require morphological closing agreement
-                    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-                    closed_mask = cv2.morphologyEx(grown_mask, cv2.MORPH_CLOSE, kernel_close)
-                    
-                    fill_area = (hull_mask > 0) & (closed_mask > 0) & (grown_mask == 0)
-                    grown_mask[fill_area] = 255
-                
-                elif total_fragments > 1:
-                    # Conservative: just use morphological closing for 2-4 fragments
-                    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-                    closed_mask = cv2.morphologyEx(grown_mask, cv2.MORPH_CLOSE, kernel_close)
-                    # Only fill where closing agrees AND it's in hide_mask
-                    fill_area = (closed_mask > 0) & (grown_mask == 0) & (hide_mask > 0)
-                    grown_mask[fill_area] = 255
+                    contours, _ = cv2.findContours(grown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if contours:
+                        all_points = np.vstack(contours)
+                        hull = cv2.convexHull(all_points)
+                        hull_mask = np.zeros((h, w), dtype=np.uint8)
+                        cv2.drawContours(hull_mask, [hull], -1, 255, cv2.FILLED)
+                        
+                        # Use larger closing kernel to bridge bigger gaps
+                        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+                        closed_mask = cv2.morphologyEx(grown_mask, cv2.MORPH_CLOSE, kernel_close)
+                        
+                        # Fill where: inside hull AND inside closed boundary
+                        fill_area = (hull_mask > 0) & (closed_mask > 0) & (grown_mask == 0)
+                        grown_mask[fill_area] = 255
+                else:
+                    # Check current fragmentation after dilation
+                    contours, _ = cv2.findContours(grown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if len(contours) > 1:
+                        # Conservative: use small closing for moderately fragmented
+                        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+                        closed_mask = cv2.morphologyEx(grown_mask, cv2.MORPH_CLOSE, kernel_close)
+                        fill_area = (closed_mask > 0) & (grown_mask == 0) & (hide_mask > 0)
+                        grown_mask[fill_area] = 255
                 
                 obj_mask = grown_mask
             
