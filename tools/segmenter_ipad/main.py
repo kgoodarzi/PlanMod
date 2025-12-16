@@ -440,20 +440,58 @@ class SegmenterApp:
             self.sidebar_view.set_objects(self.get_objects_for_page())
 
 
+def get_screen_size():
+    """Get screen size in a way that works across Pyto versions."""
+    # Try different methods to get screen size
+    
+    # Method 1: Try UIKit via rubicon-objc (Pyto)
+    try:
+        from rubicon.objc import ObjCClass
+        UIScreen = ObjCClass('UIScreen')
+        main_screen = UIScreen.mainScreen
+        bounds = main_screen.bounds
+        return (bounds.size.width, bounds.size.height)
+    except:
+        pass
+    
+    # Method 2: Try objc_util (Pythonista style)
+    try:
+        from objc_util import ObjCClass
+        UIScreen = ObjCClass('UIScreen')
+        main_screen = UIScreen.mainScreen()
+        bounds = main_screen.bounds()
+        return (bounds.size.width, bounds.size.height)
+    except:
+        pass
+    
+    # Method 3: Default iPad sizes
+    # iPad Pro 12.9": 1024x1366
+    # iPad Pro 11": 834x1194
+    # iPad Air/regular: 820x1180
+    return (1024, 768)  # Safe default
+
+
 def create_pyto_ui(app: SegmenterApp):
     """Create the full Pyto UI."""
-    from tools.segmenter_ipad.ui.canvas_view import CanvasView
-    from tools.segmenter_ipad.ui.toolbar import ToolbarView
-    from tools.segmenter_ipad.ui.sidebar import SidebarView
-    from tools.segmenter_ipad.ui.dialogs import show_alert
+    # Try relative imports first, then full path
+    try:
+        from ui.canvas_view import CanvasView
+        from ui.toolbar import ToolbarView
+        from ui.sidebar import SidebarView
+        from ui.dialogs import show_alert
+    except ImportError:
+        from tools.segmenter_ipad.ui.canvas_view import CanvasView
+        from tools.segmenter_ipad.ui.toolbar import ToolbarView
+        from tools.segmenter_ipad.ui.sidebar import SidebarView
+        from tools.segmenter_ipad.ui.dialogs import show_alert
     
     # Main view
     main_view = ui.View()
     main_view.background_color = ui.Color.rgb(0.11, 0.11, 0.12)
     
     # Get screen size
-    screen = ui.Screen.size
-    width, height = screen[0], screen[1]
+    width, height = get_screen_size()
+    print(f"Screen size: {width}x{height}")
     
     # Toolbar at top
     toolbar = ToolbarView(
