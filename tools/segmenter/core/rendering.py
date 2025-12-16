@@ -210,59 +210,40 @@ class Renderer:
                 if not np.any(inst_mask > 0):
                     continue
                 
-                # Fill gaps for this instance
+                # Two-step gap filling:
+                # 1. Constrained dilation into hide_mask (connects through text/hatch)
+                # 2. Fill internal holes (imfill) - holes completely surrounded by mask
                 if has_hide_mask:
-                    # Check fragmentation of this instance
-                    orig_contours, _ = cv2.findContours(inst_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    orig_fragment_count = len(orig_contours)
-                    orig_small_frags = sum(1 for c in orig_contours if cv2.contourArea(c) < 2000)
-                    
-                    # Step 1: Constrained dilation into hide_mask pixels
                     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
                     grown_mask = inst_mask.copy()
                     
-                    for _ in range(100):
+                    # Step 1: Grow into hide_mask pixels (text/hatch areas)
+                    for _ in range(200):
                         dilated = cv2.dilate(grown_mask, kernel, iterations=1)
                         new_pixels = (dilated > 0) & (grown_mask == 0) & (hide_mask > 0)
                         if not np.any(new_pixels):
                             break
                         grown_mask[new_pixels] = 255
                     
-                    # Step 2: Check if convex hull fill is appropriate
-                    is_highly_fragmented = orig_fragment_count >= 5 or orig_small_frags >= 3
-                    
-                    if is_highly_fragmented:
-                        contours, _ = cv2.findContours(grown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                        if contours:
-                            all_points = np.vstack(contours)
-                            hull = cv2.convexHull(all_points)
-                            hull_area = cv2.contourArea(hull)
-                            
-                            # Check compactness: hull should be roughly compact, not linear
-                            # Get bounding rect to check aspect ratio
-                            x, y, bw, bh = cv2.boundingRect(hull)
-                            aspect_ratio = max(bw, bh) / (min(bw, bh) + 1)
-                            
-                            # Also check fill ratio: grown_mask pixels vs hull area
-                            grown_pixels = np.sum(grown_mask > 0)
-                            fill_ratio = grown_pixels / (hull_area + 1)
-                            
-                            # Only fill hull if:
-                            # - Aspect ratio < 5 (not too elongated/wire-like)
-                            # - Fill ratio > 0.05 (fragments cover reasonable portion of hull)
-                            if aspect_ratio < 5 and fill_ratio > 0.05:
-                                hull_mask = np.zeros((h, w), dtype=np.uint8)
-                                cv2.drawContours(hull_mask, [hull], -1, 255, cv2.FILLED)
-                                fill_area = (hull_mask > 0) & (grown_mask == 0)
-                                grown_mask[fill_area] = 255
-                    else:
-                        # Conservative: use small closing for moderately fragmented
-                        contours, _ = cv2.findContours(grown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                        if len(contours) > 1:
-                            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-                            closed_mask = cv2.morphologyEx(grown_mask, cv2.MORPH_CLOSE, kernel_close)
-                            fill_area = (closed_mask > 0) & (grown_mask == 0) & (hide_mask > 0)
-                            grown_mask[fill_area] = 255
+                    # Step 2: Fill internal holes using imfill technique
+                    # This fills areas completely surrounded by the grown mask
+                    # (holes that couldn't connect to image edges)
+                    if np.any(grown_mask > 0):
+                        # Pad to ensure flood fill reaches all edges
+                        padded = np.pad(grown_mask, 1, mode='constant', constant_values=0)
+                        
+                        # Invert: mask pixels become barriers
+                        inverted = 255 - padded
+                        
+                        # Flood fill from corner - marks all exterior pixels
+                        flood_result = inverted.copy()
+                        cv2.floodFill(flood_result, None, (0, 0), 128)
+                        
+                        # Internal holes = pixels still 255 (not reached by flood)
+                        internal_holes = (flood_result == 255)[1:-1, 1:-1]
+                        
+                        # Fill internal holes
+                        grown_mask[internal_holes] = 255
                     
                     inst_mask = grown_mask
                 
