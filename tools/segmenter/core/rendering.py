@@ -197,60 +197,77 @@ class Renderer:
             opacity = planform_opacity if obj.category == "planform" else 0.7
             alpha_val = int(255 * opacity)
             
-            # Collect all element masks for this object
+            # Process each INSTANCE separately to avoid cross-instance filling
             obj_mask = np.zeros((h, w), dtype=np.uint8)
+            
             for inst in obj.instances:
+                # Collect masks for this instance only
+                inst_mask = np.zeros((h, w), dtype=np.uint8)
                 for elem in inst.elements:
                     if elem.mask is not None and elem.mask.shape == (h, w):
-                        obj_mask = np.maximum(obj_mask, elem.mask)
-            
-            # Fill gaps caused by text/hatch
-            if has_hide_mask and np.any(obj_mask > 0):
-                # Check fragmentation BEFORE dilation (original state)
-                orig_contours, _ = cv2.findContours(obj_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                orig_fragment_count = len(orig_contours)
-                orig_small_frags = sum(1 for c in orig_contours if cv2.contourArea(c) < 2000)
+                        inst_mask = np.maximum(inst_mask, elem.mask)
                 
-                # Determine if this is a highly fragmented object
-                is_highly_fragmented = orig_fragment_count >= 5 or orig_small_frags >= 3
+                if not np.any(inst_mask > 0):
+                    continue
                 
-                # Step 1: Constrained dilation into hide_mask pixels
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-                grown_mask = obj_mask.copy()
-                
-                for _ in range(100):
-                    dilated = cv2.dilate(grown_mask, kernel, iterations=1)
-                    new_pixels = (dilated > 0) & (grown_mask == 0) & (hide_mask > 0)
-                    if not np.any(new_pixels):
-                        break
-                    grown_mask[new_pixels] = 255
-                
-                # Step 2: Additional fill based on fragmentation level
-                if is_highly_fragmented:
-                    # Aggressive: use convex hull ONLY for highly fragmented objects
-                    # This handles cases where fragments are far apart (sparse hatch)
-                    contours, _ = cv2.findContours(grown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    if contours:
-                        all_points = np.vstack(contours)
-                        hull = cv2.convexHull(all_points)
-                        hull_mask = np.zeros((h, w), dtype=np.uint8)
-                        cv2.drawContours(hull_mask, [hull], -1, 255, cv2.FILLED)
-                        
-                        # Fill entire convex hull - fragments define the boundary
-                        # No closing requirement - hull is bounded by fragment positions
-                        fill_area = (hull_mask > 0) & (grown_mask == 0)
-                        grown_mask[fill_area] = 255
-                else:
-                    # Check current fragmentation after dilation
-                    contours, _ = cv2.findContours(grown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    if len(contours) > 1:
+                # Fill gaps for this instance
+                if has_hide_mask:
+                    # Check fragmentation of this instance
+                    orig_contours, _ = cv2.findContours(inst_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    orig_fragment_count = len(orig_contours)
+                    orig_small_frags = sum(1 for c in orig_contours if cv2.contourArea(c) < 2000)
+                    
+                    # Step 1: Constrained dilation into hide_mask pixels
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                    grown_mask = inst_mask.copy()
+                    
+                    for _ in range(100):
+                        dilated = cv2.dilate(grown_mask, kernel, iterations=1)
+                        new_pixels = (dilated > 0) & (grown_mask == 0) & (hide_mask > 0)
+                        if not np.any(new_pixels):
+                            break
+                        grown_mask[new_pixels] = 255
+                    
+                    # Step 2: Check if convex hull fill is appropriate
+                    is_highly_fragmented = orig_fragment_count >= 5 or orig_small_frags >= 3
+                    
+                    if is_highly_fragmented:
+                        contours, _ = cv2.findContours(grown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        if contours:
+                            all_points = np.vstack(contours)
+                            hull = cv2.convexHull(all_points)
+                            hull_area = cv2.contourArea(hull)
+                            
+                            # Check compactness: hull should be roughly compact, not linear
+                            # Get bounding rect to check aspect ratio
+                            x, y, bw, bh = cv2.boundingRect(hull)
+                            aspect_ratio = max(bw, bh) / (min(bw, bh) + 1)
+                            
+                            # Also check fill ratio: grown_mask pixels vs hull area
+                            grown_pixels = np.sum(grown_mask > 0)
+                            fill_ratio = grown_pixels / (hull_area + 1)
+                            
+                            # Only fill hull if:
+                            # - Aspect ratio < 5 (not too elongated/wire-like)
+                            # - Fill ratio > 0.05 (fragments cover reasonable portion of hull)
+                            if aspect_ratio < 5 and fill_ratio > 0.05:
+                                hull_mask = np.zeros((h, w), dtype=np.uint8)
+                                cv2.drawContours(hull_mask, [hull], -1, 255, cv2.FILLED)
+                                fill_area = (hull_mask > 0) & (grown_mask == 0)
+                                grown_mask[fill_area] = 255
+                    else:
                         # Conservative: use small closing for moderately fragmented
-                        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-                        closed_mask = cv2.morphologyEx(grown_mask, cv2.MORPH_CLOSE, kernel_close)
-                        fill_area = (closed_mask > 0) & (grown_mask == 0) & (hide_mask > 0)
-                        grown_mask[fill_area] = 255
+                        contours, _ = cv2.findContours(grown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        if len(contours) > 1:
+                            kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+                            closed_mask = cv2.morphologyEx(grown_mask, cv2.MORPH_CLOSE, kernel_close)
+                            fill_area = (closed_mask > 0) & (grown_mask == 0) & (hide_mask > 0)
+                            grown_mask[fill_area] = 255
+                    
+                    inst_mask = grown_mask
                 
-                obj_mask = grown_mask
+                # Add this instance to the object mask
+                obj_mask = np.maximum(obj_mask, inst_mask)
             
             # Apply to overlay
             mask_region = obj_mask > 0
