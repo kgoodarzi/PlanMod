@@ -1,6 +1,6 @@
 {
   "version": "5.0",
-  "timestamp": "2025-12-15T13:48:47.460825",
+  "timestamp": "2025-12-15T16:50:18.422138",
   "categories": {
     "planform": {
       "name": "planform",
@@ -7037,145 +7037,61 @@
           },
           "elements": [
             {
-              "element_id": "0ac9af32",
+              "element_id": "b81f9620",
               "category": "UC",
-              "mode": "flood",
+              "mode": "polyline",
               "points": [
                 [
-                  520,
-                  1002
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "b732139f",
-              "category": "UC",
-              "mode": "flood",
-              "points": [
+                  470,
+                  1022
+                ],
                 [
-                  471,
-                  1019
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "76fd9d90",
-              "category": "UC",
-              "mode": "flood",
-              "points": [
+                  479,
+                  1022
+                ],
+                [
+                  479,
+                  991
+                ],
+                [
+                  575,
+                  991
+                ],
+                [
+                  576,
+                  1022
+                ],
+                [
+                  652,
+                  1021
+                ],
+                [
+                  563,
+                  1116
+                ],
+                [
+                  489,
+                  1292
+                ],
+                [
+                  483,
+                  1300
+                ],
                 [
                   475,
-                  1019
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "40f4f193",
-              "category": "UC",
-              "mode": "flood",
-              "points": [
+                  1302
+                ],
                 [
-                  487,
-                  1019
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "49808db4",
-              "category": "UC",
-              "mode": "flood",
-              "points": [
+                  467,
+                  1300
+                ],
                 [
-                  531,
-                  1041
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "1b2d525f",
-              "category": "UC",
-              "mode": "flood",
-              "points": [
+                  462,
+                  1296
+                ],
                 [
-                  474,
-                  1048
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "f2028245",
-              "category": "UC",
-              "mode": "flood",
-              "points": [
-                [
-                  463,
-                  1233
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "5e88fc4f",
-              "category": "UC",
-              "mode": "flood",
-              "points": [
-                [
-                  473,
-                  1239
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "a0fcb141",
-              "category": "UC",
-              "mode": "flood",
-              "points": [
-                [
-                  463,
-                  1283
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "237bd481",
-              "category": "UC",
-              "mode": "flood",
-              "points": [
-                [
-                  472,
-                  1274
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "45e3e1ab",
-              "category": "UC",
-              "mode": "flood",
-              "points": [
-                [
-                  472,
-                  1289
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "127baf27",
-              "category": "UC",
-              "mode": "flood",
-              "points": [
-                [
-                  472,
-                  1285
+                  459,
+                  1290
                 ]
               ],
               "label_position": "center"
@@ -7197,7 +7113,7 @@
       "dpi": 150.0,
       "pdf_width_inches": 0.0,
       "pdf_height_inches": 0.0,
-      "zoom_level": 0.6456410256410257,
+      "zoom_level": 0.589242546333602,
       "scroll_x": 0.0,
       "scroll_y": 0.0,
       "hide_background": false,
@@ -190570,7 +190486,7 @@
       "dpi": 150.0,
       "pdf_width_inches": 0.0,
       "pdf_height_inches": 0.0,
-      "zoom_level": 0.6456410256410257,
+      "zoom_level": 0.589242546333602,
       "scroll_x": 0.0,
       "scroll_y": 0.0,
       "hide_background": false,
@@ -232631,7 +232547,7 @@
       "dpi": 150.0,
       "pdf_width_inches": 0.0,
       "pdf_height_inches": 0.0,
-      "zoom_level": 0.6456410256410257,
+      "zoom_level": 0.589242546333602,
       "scroll_x": 0.0,
       "scroll_y": 0.0,
       "hide_background": false,
@@ -234154,7 +234070,7 @@
   ],
   "view_state": {
     "current_page_id": "25f028f4",
-    "zoom_level": 0.6456410256410257,
+    "zoom_level": 0.589242546333602,
     "group_by": "none",
     "show_labels": true,
     "current_view": "grouped",
