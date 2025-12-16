@@ -2741,6 +2741,11 @@ class SegmenterApp:
             
             menu.add_separator()
         
+        # Instance actions (when instance is selected but not through object menu)
+        elif num_instances >= 1 and num_objects == 0:
+            menu.add_command(label="Edit Attributes", command=self._edit_attributes)
+            menu.add_separator()
+        
         # Expand/collapse
         if item:
             menu.add_command(label="Expand", command=lambda: self.object_tree.item(item, open=True))

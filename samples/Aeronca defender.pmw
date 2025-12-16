@@ -1,6 +1,6 @@
 {
   "version": "5.0",
-  "timestamp": "2025-12-15T16:50:18.422138",
+  "timestamp": "2025-12-15T17:48:26.354702",
   "categories": {
     "planform": {
       "name": "planform",
@@ -445,7 +445,7 @@
         },
         {
           "instance_id": "0a301d10",
-          "instance_num": 3,
+          "instance_num": 2,
           "page_id": "25f028f4",
           "view_type": "",
           "attributes": {
@@ -494,13 +494,29 @@
           },
           "elements": [
             {
-              "element_id": "24bc6968",
+              "element_id": "57dd9518",
               "category": "F",
-              "mode": "flood",
+              "mode": "polyline",
               "points": [
                 [
-                  986,
-                  442
+                  859,
+                  434
+                ],
+                [
+                  1057,
+                  434
+                ],
+                [
+                  1057,
+                  453
+                ],
+                [
+                  959,
+                  459
+                ],
+                [
+                  859,
+                  454
                 ]
               ],
               "label_position": "center"
@@ -1076,281 +1092,6 @@
                 [
                   157,
                   865
-                ]
-              ],
-              "label_position": "center"
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "object_id": "28651f50",
-      "name": "Servo1",
-      "category": "Servos",
-      "instances": [
-        {
-          "instance_id": "ed0b992c",
-          "instance_num": 1,
-          "page_id": "25f028f4",
-          "view_type": "grouped",
-          "attributes": {
-            "material": "",
-            "width": 0.0,
-            "height": 0.0,
-            "depth": 0.0,
-            "obj_type": "",
-            "view": "side",
-            "description": "",
-            "url": "",
-            "quantity": 1,
-            "notes": ""
-          },
-          "elements": [
-            {
-              "element_id": "022acb95",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  382,
-                  897
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "ece146ac",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  346,
-                  893
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "8b1ffafc",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  387,
-                  890
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "76bf4051",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  379,
-                  914
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "80d73f9d",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  348,
-                  917
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "2dd92015",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  452,
-                  907
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "d171b2fc",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  453,
-                  902
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "acd59d6d",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  397,
-                  924
-                ]
-              ],
-              "label_position": "center"
-            }
-          ]
-        },
-        {
-          "instance_id": "03ab11aa",
-          "instance_num": 2,
-          "page_id": "25f028f4",
-          "view_type": "grouped",
-          "attributes": {
-            "material": "",
-            "width": 0.0,
-            "height": 0.0,
-            "depth": 0.0,
-            "obj_type": "",
-            "view": "top",
-            "description": "",
-            "url": "",
-            "quantity": 1,
-            "notes": ""
-          },
-          "elements": [
-            {
-              "element_id": "d3061326",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  352,
-                  181
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "a4916e77",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  371,
-                  181
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "f1d6a58e",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  375,
-                  189
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "75b1a038",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  387,
-                  189
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "23eaf8fb",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  423,
-                  189
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "d7da23ea",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  366,
-                  212
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "06823fb1",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  394,
-                  221
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "c6fc5e67",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  349,
-                  214
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "510ebe8b",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  354,
-                  217
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "cb7ff7c2",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  351,
-                  223
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "94a532d7",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  353,
-                  220
                 ]
               ],
               "label_position": "center"
@@ -2724,40 +2465,8 @@
       "category": "F",
       "instances": [
         {
-          "instance_id": "e9faf4aa",
-          "instance_num": 4,
-          "page_id": "25f028f4",
-          "view_type": "",
-          "attributes": {
-            "material": "",
-            "width": 0.0,
-            "height": 0.0,
-            "depth": 0.0,
-            "obj_type": "",
-            "view": "side",
-            "description": "",
-            "url": "",
-            "quantity": 1,
-            "notes": ""
-          },
-          "elements": [
-            {
-              "element_id": "61e0e1f9",
-              "category": "F",
-              "mode": "flood",
-              "points": [
-                [
-                  679,
-                  632
-                ]
-              ],
-              "label_position": "center"
-            }
-          ]
-        },
-        {
           "instance_id": "fbe361b4",
-          "instance_num": 3,
+          "instance_num": 2,
           "page_id": "25f028f4",
           "view_type": "",
           "attributes": {
@@ -2766,7 +2475,7 @@
             "height": 0.0,
             "depth": 0.0,
             "obj_type": "",
-            "view": "",
+            "view": "template",
             "description": "",
             "url": "",
             "quantity": 1,
@@ -2798,7 +2507,7 @@
             "height": 0.0,
             "depth": 0.0,
             "obj_type": "",
-            "view": "",
+            "view": "template",
             "description": "",
             "url": "",
             "quantity": 1,
@@ -2813,6 +2522,50 @@
                 [
                   1034,
                   480
+                ]
+              ],
+              "label_position": "center"
+            }
+          ]
+        },
+        {
+          "instance_id": "351a1dce",
+          "instance_num": 3,
+          "page_id": "25f028f4",
+          "view_type": "grouped",
+          "attributes": {
+            "material": "",
+            "width": 0.0,
+            "height": 0.0,
+            "depth": 0.0,
+            "obj_type": "",
+            "view": "side",
+            "description": "",
+            "url": "",
+            "quantity": 1,
+            "notes": ""
+          },
+          "elements": [
+            {
+              "element_id": "0f11647b",
+              "category": "F",
+              "mode": "polyline",
+              "points": [
+                [
+                  664,
+                  604
+                ],
+                [
+                  674,
+                  604
+                ],
+                [
+                  674,
+                  673
+                ],
+                [
+                  664,
+                  673
                 ]
               ],
               "label_position": "center"
@@ -3094,7 +2847,7 @@
     },
     {
       "object_id": "b67212b5",
-      "name": "UC3",
+      "name": "UC",
       "category": "UC",
       "instances": [
         {
@@ -5512,384 +5265,6 @@
       ]
     },
     {
-      "object_id": "b0d4c49a",
-      "name": "M",
-      "category": "M",
-      "instances": [
-        {
-          "instance_id": "e714e86f",
-          "instance_num": 1,
-          "page_id": "25f028f4",
-          "view_type": "",
-          "attributes": {
-            "material": "",
-            "width": 0.0,
-            "height": 0.0,
-            "depth": 0.0,
-            "obj_type": "",
-            "view": "",
-            "description": "",
-            "url": "",
-            "quantity": 1,
-            "notes": ""
-          },
-          "elements": [
-            {
-              "element_id": "a40874cd",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  388,
-                  300
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "5821cd53",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  462,
-                  261
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "10739af3",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  472,
-                  238
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "e9df57b8",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  472,
-                  272
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "5db3a152",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  165,
-                  198
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "4ed91e26",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  220,
-                  208
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "7861946e",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  378,
-                  207
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "b96b5f0d",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  374,
-                  180
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "24258d6d",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  374,
-                  188
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "fca83ed1",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  389,
-                  188
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "5ee4e055",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  418,
-                  188
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "bf6d0b83",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  369,
-                  289
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "8b9ceb6d",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  361,
-                  264
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "921d07bc",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  360,
-                  238
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "992614e4",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  352,
-                  191
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "3f9c5fc7",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  352,
-                  313
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "496ad0f5",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  352,
-                  278
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "15b9c428",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  353,
-                  285
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "9ac0984f",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  352,
-                  203
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "d42a39a3",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  352,
-                  214
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "95754bd3",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  352,
-                  220
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "57011afb",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  374,
-                  311
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "7b643d1e",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  395,
-                  312
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "a653e111",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  424,
-                  311
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "57170a19",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  478,
-                  337
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "8e561317",
-              "category": "M",
-              "mode": "flood",
-              "points": [
-                [
-                  164,
-                  302
-                ]
-              ],
-              "label_position": "center"
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "object_id": "81ed7070",
-      "name": "UC4",
-      "category": "UC",
-      "instances": [
-        {
-          "instance_id": "21a2c831",
-          "instance_num": 1,
-          "page_id": "25f028f4",
-          "view_type": "",
-          "attributes": {
-            "material": "",
-            "width": 0.0,
-            "height": 0.0,
-            "depth": 0.0,
-            "obj_type": "",
-            "view": "",
-            "description": "",
-            "url": "",
-            "quantity": 1,
-            "notes": ""
-          },
-          "elements": [
-            {
-              "element_id": "961d47c6",
-              "category": "UC",
-              "mode": "flood",
-              "points": [
-                [
-                  621,
-                  179
-                ]
-              ],
-              "label_position": "center"
-            }
-          ]
-        }
-      ]
-    },
-    {
       "object_id": "7f983d4b",
       "name": "longeron1",
       "category": "longeron",
@@ -5929,308 +5304,6 @@
       ]
     },
     {
-      "object_id": "1e874238",
-      "name": "FS1",
-      "category": "FS",
-      "instances": [
-        {
-          "instance_id": "8d036ae0",
-          "instance_num": 2,
-          "page_id": "25f028f4",
-          "view_type": "",
-          "attributes": {
-            "material": "",
-            "width": 0.0,
-            "height": 0.0,
-            "depth": 0.0,
-            "obj_type": "",
-            "view": "",
-            "description": "",
-            "url": "",
-            "quantity": 1,
-            "notes": ""
-          },
-          "elements": [
-            {
-              "element_id": "ef2af6bd",
-              "category": "FS",
-              "mode": "flood",
-              "points": [
-                [
-                  2073,
-                  1516
-                ]
-              ],
-              "label_position": "center"
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "object_id": "61894bb6",
-      "name": "SErvo2",
-      "category": "Servos",
-      "instances": [
-        {
-          "instance_id": "f0109c69",
-          "instance_num": 1,
-          "page_id": "25f028f4",
-          "view_type": "grouped",
-          "attributes": {
-            "material": "",
-            "width": 0.0,
-            "height": 0.0,
-            "depth": 0.0,
-            "obj_type": "",
-            "view": "top",
-            "description": "",
-            "url": "",
-            "quantity": 1,
-            "notes": ""
-          },
-          "elements": [
-            {
-              "element_id": "20773783",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  352,
-                  278
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "60c9c073",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  351,
-                  282
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "1f074065",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  351,
-                  284
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "da2dc2f9",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  351,
-                  294
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "4929f774",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  365,
-                  278
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "f43da49f",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  389,
-                  270
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "d4c23f58",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  374,
-                  305
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "5ee664e7",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  374,
-                  310
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "b31f92dd",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  399,
-                  310
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "73652813",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  415,
-                  311
-                ]
-              ],
-              "label_position": "center"
-            }
-          ]
-        },
-        {
-          "instance_id": "d38405e0",
-          "instance_num": 2,
-          "page_id": "25f028f4",
-          "view_type": "",
-          "attributes": {
-            "material": "",
-            "width": 0.0,
-            "height": 0.0,
-            "depth": 0.0,
-            "obj_type": "",
-            "view": "side",
-            "description": "",
-            "url": "",
-            "quantity": 1,
-            "notes": ""
-          },
-          "elements": [
-            {
-              "element_id": "e8ba9e3e",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  349,
-                  915
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "d206b8dd",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  386,
-                  890
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "6174614c",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  387,
-                  897
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "9eeab2e7",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  346,
-                  899
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "f6dcf057",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  412,
-                  913
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "14794df2",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  397,
-                  923
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "d475ae7c",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  452,
-                  907
-                ]
-              ],
-              "label_position": "center"
-            },
-            {
-              "element_id": "269dead5",
-              "category": "Servos",
-              "mode": "flood",
-              "points": [
-                [
-                  452,
-                  902
-                ]
-              ],
-              "label_position": "center"
-            }
-          ]
-        }
-      ]
-    },
-    {
       "object_id": "d5539698",
       "name": "longeron2",
       "category": "longeron",
@@ -6261,6 +5334,18 @@
                 [
                   1164,
                   352
+                ]
+              ],
+              "label_position": "center"
+            },
+            {
+              "element_id": "22298991",
+              "category": "longeron",
+              "mode": "flood",
+              "points": [
+                [
+                  1695,
+                  300
                 ]
               ],
               "label_position": "center"
@@ -6399,6 +5484,30 @@
                 [
                   1893,
                   871
+                ]
+              ],
+              "label_position": "center"
+            },
+            {
+              "element_id": "bf75273e",
+              "category": "longeron",
+              "mode": "flood",
+              "points": [
+                [
+                  1715,
+                  892
+                ]
+              ],
+              "label_position": "center"
+            },
+            {
+              "element_id": "04a6a53d",
+              "category": "longeron",
+              "mode": "flood",
+              "points": [
+                [
+                  1877,
+                  873
                 ]
               ],
               "label_position": "center"
@@ -7099,6 +6208,1337 @@
           ]
         }
       ]
+    },
+    {
+      "object_id": "3ebf81ce",
+      "name": "UC",
+      "category": "UC",
+      "instances": [
+        {
+          "instance_id": "4f575e2a",
+          "instance_num": 1,
+          "page_id": "25f028f4",
+          "view_type": "grouped",
+          "attributes": {
+            "material": "",
+            "width": 0.0,
+            "height": 0.0,
+            "depth": 0.0,
+            "obj_type": "",
+            "view": "top",
+            "description": "",
+            "url": "",
+            "quantity": 1,
+            "notes": ""
+          },
+          "elements": [
+            {
+              "element_id": "e1f7fb54",
+              "category": "UC",
+              "mode": "polyline",
+              "points": [
+                [
+                  662,
+                  151
+                ],
+                [
+                  662,
+                  250
+                ],
+                [
+                  623,
+                  249
+                ],
+                [
+                  622,
+                  237
+                ],
+                [
+                  617,
+                  225
+                ],
+                [
+                  610,
+                  214
+                ],
+                [
+                  600,
+                  205
+                ],
+                [
+                  588,
+                  197
+                ],
+                [
+                  578,
+                  194
+                ],
+                [
+                  564,
+                  191
+                ],
+                [
+                  549,
+                  192
+                ],
+                [
+                  535,
+                  195
+                ],
+                [
+                  526,
+                  199
+                ],
+                [
+                  515,
+                  206
+                ],
+                [
+                  506,
+                  215
+                ],
+                [
+                  496,
+                  232
+                ],
+                [
+                  494,
+                  249
+                ],
+                [
+                  495,
+                  263
+                ],
+                [
+                  504,
+                  282
+                ],
+                [
+                  516,
+                  294
+                ],
+                [
+                  531,
+                  303
+                ],
+                [
+                  545,
+                  307
+                ],
+                [
+                  564,
+                  308
+                ],
+                [
+                  581,
+                  306
+                ],
+                [
+                  594,
+                  299
+                ],
+                [
+                  607,
+                  289
+                ],
+                [
+                  617,
+                  275
+                ],
+                [
+                  622,
+                  261
+                ],
+                [
+                  623,
+                  250
+                ],
+                [
+                  662,
+                  251
+                ],
+                [
+                  662,
+                  349
+                ],
+                [
+                  576,
+                  349
+                ],
+                [
+                  576,
+                  342
+                ],
+                [
+                  479,
+                  341
+                ],
+                [
+                  474,
+                  342
+                ],
+                [
+                  474,
+                  345
+                ],
+                [
+                  475,
+                  348
+                ],
+                [
+                  477,
+                  347
+                ],
+                [
+                  479,
+                  345
+                ],
+                [
+                  479,
+                  348
+                ],
+                [
+                  470,
+                  348
+                ],
+                [
+                  470,
+                  152
+                ],
+                [
+                  480,
+                  151
+                ],
+                [
+                  479,
+                  153
+                ],
+                [
+                  476,
+                  152
+                ],
+                [
+                  474,
+                  153
+                ],
+                [
+                  474,
+                  155
+                ],
+                [
+                  475,
+                  157
+                ],
+                [
+                  478,
+                  157
+                ],
+                [
+                  576,
+                  157
+                ],
+                [
+                  576,
+                  151
+                ]
+              ],
+              "label_position": "center"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "object_id": "db5e252f",
+      "name": "M",
+      "category": "M",
+      "instances": [
+        {
+          "instance_id": "e4ceb565",
+          "instance_num": 1,
+          "page_id": "25f028f4",
+          "view_type": "grouped",
+          "attributes": {
+            "material": "",
+            "width": 0.0,
+            "height": 0.0,
+            "depth": 0.0,
+            "obj_type": "",
+            "view": "top",
+            "description": "",
+            "url": "",
+            "quantity": 1,
+            "notes": ""
+          },
+          "elements": [
+            {
+              "element_id": "33a441fc",
+              "category": "M",
+              "mode": "polyline",
+              "points": [
+                [
+                  478,
+                  152
+                ],
+                [
+                  405,
+                  153
+                ],
+                [
+                  374,
+                  155
+                ],
+                [
+                  340,
+                  157
+                ],
+                [
+                  305,
+                  161
+                ],
+                [
+                  280,
+                  163
+                ],
+                [
+                  255,
+                  167
+                ],
+                [
+                  233,
+                  171
+                ],
+                [
+                  211,
+                  176
+                ],
+                [
+                  190,
+                  181
+                ],
+                [
+                  173,
+                  187
+                ],
+                [
+                  162,
+                  191
+                ],
+                [
+                  161,
+                  203
+                ],
+                [
+                  166,
+                  204
+                ],
+                [
+                  167,
+                  224
+                ],
+                [
+                  293,
+                  229
+                ],
+                [
+                  303,
+                  235
+                ],
+                [
+                  309,
+                  240
+                ],
+                [
+                  313,
+                  246
+                ],
+                [
+                  314,
+                  249
+                ],
+                [
+                  361,
+                  249
+                ],
+                [
+                  362,
+                  238
+                ],
+                [
+                  366,
+                  230
+                ],
+                [
+                  372,
+                  220
+                ],
+                [
+                  382,
+                  213
+                ],
+                [
+                  391,
+                  209
+                ],
+                [
+                  404,
+                  206
+                ],
+                [
+                  420,
+                  209
+                ],
+                [
+                  430,
+                  215
+                ],
+                [
+                  437,
+                  222
+                ],
+                [
+                  443,
+                  229
+                ],
+                [
+                  447,
+                  240
+                ],
+                [
+                  448,
+                  249
+                ],
+                [
+                  447,
+                  261
+                ],
+                [
+                  442,
+                  272
+                ],
+                [
+                  435,
+                  282
+                ],
+                [
+                  426,
+                  287
+                ],
+                [
+                  415,
+                  293
+                ],
+                [
+                  401,
+                  294
+                ],
+                [
+                  389,
+                  291
+                ],
+                [
+                  380,
+                  286
+                ],
+                [
+                  371,
+                  277
+                ],
+                [
+                  366,
+                  266
+                ],
+                [
+                  362,
+                  257
+                ],
+                [
+                  361,
+                  250
+                ],
+                [
+                  315,
+                  250
+                ],
+                [
+                  316,
+                  258
+                ],
+                [
+                  316,
+                  266
+                ],
+                [
+                  312,
+                  273
+                ],
+                [
+                  307,
+                  280
+                ],
+                [
+                  300,
+                  285
+                ],
+                [
+                  289,
+                  288
+                ],
+                [
+                  167,
+                  282
+                ],
+                [
+                  167,
+                  296
+                ],
+                [
+                  162,
+                  296
+                ],
+                [
+                  162,
+                  308
+                ],
+                [
+                  178,
+                  315
+                ],
+                [
+                  202,
+                  320
+                ],
+                [
+                  221,
+                  325
+                ],
+                [
+                  247,
+                  330
+                ],
+                [
+                  272,
+                  334
+                ],
+                [
+                  300,
+                  338
+                ],
+                [
+                  328,
+                  341
+                ],
+                [
+                  360,
+                  345
+                ],
+                [
+                  391,
+                  347
+                ],
+                [
+                  427,
+                  348
+                ],
+                [
+                  453,
+                  349
+                ],
+                [
+                  480,
+                  349
+                ],
+                [
+                  479,
+                  306
+                ],
+                [
+                  484,
+                  306
+                ],
+                [
+                  484,
+                  194
+                ],
+                [
+                  479,
+                  194
+                ]
+              ],
+              "label_position": "center"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "object_id": "ae488675",
+      "name": "Servo1",
+      "category": "Servos",
+      "instances": [
+        {
+          "instance_id": "fea404a3",
+          "instance_num": 1,
+          "page_id": "25f028f4",
+          "view_type": "grouped",
+          "attributes": {
+            "material": "",
+            "width": 0.0,
+            "height": 0.0,
+            "depth": 0.0,
+            "obj_type": "",
+            "view": "",
+            "description": "",
+            "url": "",
+            "quantity": 1,
+            "notes": ""
+          },
+          "elements": [
+            {
+              "element_id": "df55fb9d",
+              "category": "Servos",
+              "mode": "polyline",
+              "points": [
+                [
+                  344,
+                  890
+                ],
+                [
+                  345,
+                  927
+                ],
+                [
+                  353,
+                  927
+                ],
+                [
+                  353,
+                  921
+                ],
+                [
+                  382,
+                  921
+                ],
+                [
+                  382,
+                  930
+                ],
+                [
+                  411,
+                  930
+                ],
+                [
+                  411,
+                  920
+                ],
+                [
+                  446,
+                  920
+                ],
+                [
+                  446,
+                  912
+                ],
+                [
+                  469,
+                  911
+                ],
+                [
+                  471,
+                  903
+                ],
+                [
+                  465,
+                  898
+                ],
+                [
+                  446,
+                  898
+                ],
+                [
+                  446,
+                  892
+                ],
+                [
+                  474,
+                  890
+                ],
+                [
+                  472,
+                  885
+                ]
+              ],
+              "label_position": "center"
+            }
+          ]
+        },
+        {
+          "instance_id": "03ab11aa",
+          "instance_num": 2,
+          "page_id": "25f028f4",
+          "view_type": "grouped",
+          "attributes": {
+            "material": "",
+            "width": 0.0,
+            "height": 0.0,
+            "depth": 0.0,
+            "obj_type": "",
+            "view": "top",
+            "description": "",
+            "url": "",
+            "quantity": 1,
+            "notes": ""
+          },
+          "elements": [
+            {
+              "element_id": "f5c29890",
+              "category": "Servos",
+              "mode": "polyline",
+              "points": [
+                [
+                  443,
+                  174
+                ],
+                [
+                  358,
+                  174
+                ],
+                [
+                  357,
+                  166
+                ],
+                [
+                  346,
+                  165
+                ],
+                [
+                  347,
+                  224
+                ],
+                [
+                  358,
+                  225
+                ],
+                [
+                  358,
+                  232
+                ],
+                [
+                  406,
+                  233
+                ],
+                [
+                  407,
+                  204
+                ],
+                [
+                  443,
+                  203
+                ]
+              ],
+              "label_position": "center"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "object_id": "ec51be88",
+      "name": "Servo2",
+      "category": "Servos",
+      "instances": [
+        {
+          "instance_id": "0a88a6a0",
+          "instance_num": 1,
+          "page_id": "25f028f4",
+          "view_type": "grouped",
+          "attributes": {
+            "material": "",
+            "width": 0.0,
+            "height": 0.0,
+            "depth": 0.0,
+            "obj_type": "",
+            "view": "top",
+            "description": "",
+            "url": "",
+            "quantity": 1,
+            "notes": ""
+          },
+          "elements": [
+            {
+              "element_id": "2e153df1",
+              "category": "Servos",
+              "mode": "polyline",
+              "points": [
+                [
+                  406,
+                  267
+                ],
+                [
+                  358,
+                  267
+                ],
+                [
+                  357,
+                  276
+                ],
+                [
+                  345,
+                  276
+                ],
+                [
+                  344,
+                  333
+                ],
+                [
+                  358,
+                  333
+                ],
+                [
+                  358,
+                  326
+                ],
+                [
+                  443,
+                  325
+                ],
+                [
+                  443,
+                  296
+                ],
+                [
+                  406,
+                  297
+                ]
+              ],
+              "label_position": "center"
+            }
+          ]
+        },
+        {
+          "instance_id": "ddd6c260",
+          "instance_num": 2,
+          "page_id": "25f028f4",
+          "view_type": "",
+          "attributes": {
+            "material": "",
+            "width": 0.0,
+            "height": 0.0,
+            "depth": 0.0,
+            "obj_type": "",
+            "view": "",
+            "description": "",
+            "url": "",
+            "quantity": 1,
+            "notes": ""
+          },
+          "elements": [
+            {
+              "element_id": "04a85267",
+              "category": "Servos",
+              "mode": "polyline",
+              "points": [
+                [
+                  345,
+                  927
+                ],
+                [
+                  354,
+                  927
+                ],
+                [
+                  353,
+                  921
+                ],
+                [
+                  382,
+                  921
+                ],
+                [
+                  382,
+                  930
+                ],
+                [
+                  412,
+                  930
+                ],
+                [
+                  412,
+                  921
+                ],
+                [
+                  446,
+                  920
+                ],
+                [
+                  446,
+                  913
+                ],
+                [
+                  470,
+                  911
+                ],
+                [
+                  471,
+                  904
+                ],
+                [
+                  465,
+                  899
+                ],
+                [
+                  445,
+                  897
+                ],
+                [
+                  445,
+                  892
+                ],
+                [
+                  473,
+                  890
+                ],
+                [
+                  473,
+                  886
+                ],
+                [
+                  343,
+                  890
+                ]
+              ],
+              "label_position": "center"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "object_id": "6fd6517a",
+      "name": "FS1",
+      "category": "FS",
+      "instances": [
+        {
+          "instance_id": "ceda775c",
+          "instance_num": 1,
+          "page_id": "25f028f4",
+          "view_type": "",
+          "attributes": {
+            "material": "",
+            "width": 0.0,
+            "height": 0.0,
+            "depth": 0.0,
+            "obj_type": "",
+            "view": "",
+            "description": "",
+            "url": "",
+            "quantity": 1,
+            "notes": ""
+          },
+          "elements": [
+            {
+              "element_id": "a1b2e925",
+              "category": "FS",
+              "mode": "flood",
+              "points": [
+                [
+                  2107,
+                  1245
+                ]
+              ],
+              "label_position": "center"
+            }
+          ]
+        },
+        {
+          "instance_id": "1d1f6a8d",
+          "instance_num": 2,
+          "page_id": "25f028f4",
+          "view_type": "",
+          "attributes": {
+            "material": "",
+            "width": 0.0,
+            "height": 0.0,
+            "depth": 0.0,
+            "obj_type": "",
+            "view": "side",
+            "description": "",
+            "url": "",
+            "quantity": 1,
+            "notes": ""
+          },
+          "elements": [
+            {
+              "element_id": "c1320705",
+              "category": "FS",
+              "mode": "polyline",
+              "points": [
+                [
+                  162,
+                  821
+                ],
+                [
+                  484,
+                  821
+                ],
+                [
+                  469,
+                  848
+                ],
+                [
+                  478,
+                  853
+                ],
+                [
+                  495,
+                  821
+                ],
+                [
+                  657,
+                  822
+                ],
+                [
+                  666,
+                  843
+                ],
+                [
+                  672,
+                  842
+                ],
+                [
+                  665,
+                  821
+                ],
+                [
+                  760,
+                  821
+                ],
+                [
+                  756,
+                  842
+                ],
+                [
+                  761,
+                  843
+                ],
+                [
+                  768,
+                  821
+                ],
+                [
+                  880,
+                  821
+                ],
+                [
+                  979,
+                  679
+                ],
+                [
+                  812,
+                  675
+                ],
+                [
+                  814,
+                  662
+                ],
+                [
+                  808,
+                  660
+                ],
+                [
+                  802,
+                  675
+                ],
+                [
+                  607,
+                  671
+                ],
+                [
+                  603,
+                  661
+                ],
+                [
+                  596,
+                  662
+                ],
+                [
+                  600,
+                  672
+                ],
+                [
+                  580,
+                  671
+                ],
+                [
+                  600,
+                  634
+                ],
+                [
+                  592,
+                  629
+                ],
+                [
+                  581,
+                  651
+                ],
+                [
+                  531,
+                  650
+                ],
+                [
+                  525,
+                  647
+                ],
+                [
+                  524,
+                  642
+                ],
+                [
+                  532,
+                  633
+                ],
+                [
+                  548,
+                  628
+                ],
+                [
+                  562,
+                  621
+                ],
+                [
+                  583,
+                  615
+                ],
+                [
+                  604,
+                  609
+                ],
+                [
+                  615,
+                  608
+                ],
+                [
+                  618,
+                  629
+                ],
+                [
+                  615,
+                  633
+                ],
+                [
+                  617,
+                  637
+                ],
+                [
+                  620,
+                  639
+                ],
+                [
+                  624,
+                  635
+                ],
+                [
+                  623,
+                  629
+                ],
+                [
+                  619,
+                  628
+                ],
+                [
+                  617,
+                  608
+                ],
+                [
+                  641,
+                  605
+                ],
+                [
+                  670,
+                  604
+                ],
+                [
+                  675,
+                  605
+                ],
+                [
+                  674,
+                  625
+                ],
+                [
+                  674,
+                  652
+                ],
+                [
+                  684,
+                  652
+                ],
+                [
+                  685,
+                  625
+                ],
+                [
+                  676,
+                  624
+                ],
+                [
+                  677,
+                  604
+                ],
+                [
+                  709,
+                  606
+                ],
+                [
+                  743,
+                  611
+                ],
+                [
+                  778,
+                  616
+                ],
+                [
+                  797,
+                  618
+                ],
+                [
+                  803,
+                  619
+                ],
+                [
+                  796,
+                  633
+                ],
+                [
+                  791,
+                  638
+                ],
+                [
+                  792,
+                  643
+                ],
+                [
+                  798,
+                  645
+                ],
+                [
+                  800,
+                  642
+                ],
+                [
+                  801,
+                  636
+                ],
+                [
+                  798,
+                  633
+                ],
+                [
+                  806,
+                  620
+                ],
+                [
+                  815,
+                  621
+                ],
+                [
+                  844,
+                  625
+                ],
+                [
+                  871,
+                  629
+                ],
+                [
+                  903,
+                  636
+                ],
+                [
+                  937,
+                  643
+                ],
+                [
+                  963,
+                  649
+                ],
+                [
+                  984,
+                  653
+                ],
+                [
+                  998,
+                  657
+                ],
+                [
+                  916,
+                  646
+                ],
+                [
+                  914,
+                  655
+                ],
+                [
+                  998,
+                  666
+                ],
+                [
+                  999,
+                  977
+                ],
+                [
+                  937,
+                  984
+                ],
+                [
+                  936,
+                  993
+                ],
+                [
+                  708,
+                  1017
+                ],
+                [
+                  665,
+                  1020
+                ],
+                [
+                  469,
+                  1022
+                ],
+                [
+                  379,
+                  1020
+                ],
+                [
+                  330,
+                  1014
+                ],
+                [
+                  289,
+                  1008
+                ],
+                [
+                  244,
+                  999
+                ],
+                [
+                  209,
+                  991
+                ],
+                [
+                  177,
+                  981
+                ],
+                [
+                  161,
+                  977
+                ]
+              ],
+              "label_position": "center"
+            }
+          ]
+        }
+      ]
     }
   ],
   "pages": [
@@ -7113,7 +7553,7 @@
       "dpi": 150.0,
       "pdf_width_inches": 0.0,
       "pdf_height_inches": 0.0,
-      "zoom_level": 0.589242546333602,
+      "zoom_level": 0.6352941176470589,
       "scroll_x": 0.0,
       "scroll_y": 0.0,
       "hide_background": false,
@@ -190486,7 +190926,7 @@
       "dpi": 150.0,
       "pdf_width_inches": 0.0,
       "pdf_height_inches": 0.0,
-      "zoom_level": 0.589242546333602,
+      "zoom_level": 0.6352941176470589,
       "scroll_x": 0.0,
       "scroll_y": 0.0,
       "hide_background": false,
@@ -232547,7 +232987,7 @@
       "dpi": 150.0,
       "pdf_width_inches": 0.0,
       "pdf_height_inches": 0.0,
-      "zoom_level": 0.589242546333602,
+      "zoom_level": 0.6352941176470589,
       "scroll_x": 0.0,
       "scroll_y": 0.0,
       "hide_background": false,
@@ -234070,10 +234510,10 @@
   ],
   "view_state": {
     "current_page_id": "25f028f4",
-    "zoom_level": 0.589242546333602,
+    "zoom_level": 0.6352941176470589,
     "group_by": "none",
     "show_labels": true,
-    "current_view": "grouped",
+    "current_view": "",
     "sidebar_width": 280,
     "tree_width": 280
   }
