@@ -49,7 +49,11 @@ class SegmenterApp:
         "line": "Line segments",
     }
     
-    def __init__(self):
+    def __init__(self, startup_workspace: str = None, startup_pdf: str = None):
+        # Store startup files
+        self._startup_workspace = startup_workspace
+        self._startup_pdf = startup_pdf
+        
         # Load settings
         self.settings = load_settings()
         self.theme = get_theme(self.settings.theme)
@@ -100,6 +104,10 @@ class SegmenterApp:
         self._init_categories()
         self._setup_ui()
         self._bind_events()
+        
+        # Schedule startup file loading after UI is ready
+        if self._startup_workspace or self._startup_pdf:
+            self.root.after(100, self._load_startup_file)
     
     def _apply_theme(self):
         """Apply VS Code/Cursor-inspired theme to ttk styles."""
@@ -3359,6 +3367,10 @@ class SegmenterApp:
         if not path:
             return
         
+        self._open_pdf_from_path(path)
+    
+    def _open_pdf_from_path(self, path: str):
+        """Open PDF from a specific path (used by both dialog and command line)."""
         # Load with dimension information
         pages = self.pdf_reader.load_with_dimensions(path)
         if not pages:
@@ -3430,6 +3442,25 @@ class SegmenterApp:
             self.workspace_file = path
             self._save_workspace()
     
+    def _load_startup_file(self):
+        """Load workspace or PDF specified via command line arguments."""
+        import os
+        
+        if self._startup_workspace:
+            path = self._startup_workspace
+            if os.path.exists(path):
+                print(f"Loading startup workspace: {path}")
+                self._load_workspace_from_path(path)
+            else:
+                messagebox.showerror("Error", f"Workspace file not found: {path}")
+        elif self._startup_pdf:
+            path = self._startup_pdf
+            if os.path.exists(path):
+                print(f"Loading startup PDF: {path}")
+                self._open_pdf_from_path(path)
+            else:
+                messagebox.showerror("Error", f"PDF file not found: {path}")
+    
     def _load_workspace(self):
         if self.pages and self.workspace_modified:
             r = messagebox.askyesnocancel("Save?", "Save workspace first?")
@@ -3442,6 +3473,10 @@ class SegmenterApp:
         if not path:
             return
         
+        self._load_workspace_from_path(path)
+    
+    def _load_workspace_from_path(self, path: str):
+        """Load workspace from a specific path (used by both dialog and command line)."""
         data = self.workspace_mgr.load(path)
         if not data:
             messagebox.showerror("Error", "Failed to load workspace")

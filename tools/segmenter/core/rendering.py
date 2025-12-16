@@ -185,9 +185,10 @@ class Renderer:
         # Create segmentation overlay
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
         
-        # Render each object's elements - simple and clean
-        # No gap filling, no dilation - just render masks as-is
-        # User should use polyline for complex hatched areas
+        # Check if we have text to fill through (text ghosting fix)
+        # Note: We only fix text ghosting, not hatch ghosting
+        has_text_mask = text_mask is not None and text_mask.shape == (h, w) and np.any(text_mask > 0)
+        
         for obj in objects:
             cat = categories.get(obj.category)
             if not cat or not cat.visible:
@@ -203,7 +204,23 @@ class Renderer:
                     if elem.mask is not None and elem.mask.shape == (h, w):
                         obj_mask = np.maximum(obj_mask, elem.mask)
             
-            # Apply to overlay - simple, no modifications
+            # Text ghosting fix: grow mask into text areas only
+            # This fills gaps caused by text that was present during flood fill
+            if has_text_mask and np.any(obj_mask > 0):
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                grown_mask = obj_mask.copy()
+                
+                for _ in range(100):
+                    dilated = cv2.dilate(grown_mask, kernel, iterations=1)
+                    # Only grow into TEXT mask pixels (not hatch)
+                    new_pixels = (dilated > 0) & (grown_mask == 0) & (text_mask > 0)
+                    if not np.any(new_pixels):
+                        break
+                    grown_mask[new_pixels] = 255
+                
+                obj_mask = grown_mask
+            
+            # Apply to overlay
             mask_region = obj_mask > 0
             overlay[mask_region, 0] = cat.color_bgr[0]
             overlay[mask_region, 1] = cat.color_bgr[1]
