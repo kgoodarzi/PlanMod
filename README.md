@@ -13,6 +13,7 @@ PlanMod is a serverless cloud-based pipeline that converts engineering and model
 - 🔄 **Substitution Engine**: Replace components with alternatives
 - ⚖️ **Mass Calculation**: Estimates weight and center of gravity
 - 🌐 **Modern Web UI**: React-based interface for easy operation
+- 🖊️ **Interactive Line Tracing**: Tools for tracing and extracting lines from technical diagrams
 
 ## Quick Start
 
@@ -134,6 +135,9 @@ PlanMod/
 ├── frontend/                 # React web UI
 ├── infrastructure/          # AWS CDK IaC
 ├── samples/                 # Sample drawings
+├── tools/                   # Utility tools
+│   ├── segmenter/          # Interactive segmentation tool
+│   └── findline/           # Line tracing and extraction tools
 └── tests/                   # Test suite
 ```
 
@@ -194,4 +198,18 @@ MIT License - See LICENSE file for details.
 
 *Built with ❤️ for model aircraft builders and engineers*
 
+## Tools
 
+### Findline Tool
+
+The `tools/findline/` directory contains interactive line tracing tools for extracting lines from technical diagrams. See `tools/findline/README.md` for detailed usage instructions.
+
+### Image Cleanup Tools
+
+Various scripts are available for removing text and leader lines from technical diagrams:
+- `remove_text_leaders.py` - Removes text labels and leader lines using morphological operations or OCR
+- `remove_text_ocr.py` - OCR-based text removal
+- `detect_leaders.py` - Leader line detection
+- `thin_lines.py` - Line thinning operations
+
+See individual script documentation for usage details.
