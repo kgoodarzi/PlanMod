@@ -22,6 +22,7 @@ from tools.segmenter.models import (
     PageTab, SegmentedObject, ObjectInstance, SegmentElement,
     DynamicCategory, create_default_categories, get_next_color
 )
+from tools.segmenter.models.attributes import ObjectAttributes
 from tools.segmenter.core import SegmentationEngine, Renderer
 from tools.segmenter.io import WorkspaceManager, PDFReader
 from tools.segmenter.dialogs import PDFLoaderDialog, LabelScanDialog, AttributeDialog, SettingsDialog
@@ -47,6 +48,7 @@ class SegmenterApp:
         "polyline": "Draw polygon",
         "freeform": "Freeform brush",
         "line": "Line segments",
+        "rect": "Rectangular selection",
     }
     
     def __init__(self, startup_workspace: str = None, startup_pdf: str = None):
@@ -82,6 +84,11 @@ class SegmenterApp:
         self.group_mode_active = False
         self.group_mode_elements: List[SegmentElement] = []
         
+        # Rectangle selection state
+        self.rect_start: Optional[tuple] = None  # (x, y) where rectangle started
+        self.rect_current: Optional[tuple] = None  # (x, y) current mouse position
+        self.rect_id = None  # Canvas item ID for rectangle preview
+        
         # Display state
         self.zoom_level = 1.0
         self.show_labels = True
@@ -90,6 +97,12 @@ class SegmenterApp:
         # Workspace state
         self.workspace_file: Optional[str] = None
         self.workspace_modified = False
+        
+        # Performance: Debouncing for display updates
+        self._update_display_pending = False
+        self._update_display_timer_id = None
+        
+        # Dialog state tracking
         
         # Create UI
         self.root = tk.Tk()
@@ -315,10 +328,11 @@ class SegmenterApp:
         
         # View options (per-page toggles)
         view_menu.add_command(label="Hide Background", command=self._toggle_hide_background)
-        view_menu.add_command(label="Hide Text", command=self._toggle_hide_text)
+        view_menu.add_command(label="Run OCR", command=self._run_ocr_for_page)
         view_menu.add_command(label="Hide Hatching", command=self._toggle_hide_hatching)
         view_menu.add_separator()
-        view_menu.add_command(label="Manage Mask Regions...", command=self._show_mask_regions_dialog)
+        view_menu.add_command(label="Create View Tab from Planform", command=self._create_view_tab_from_planform)
+        view_menu.add_separator()
         view_menu.add_separator()
         
         # Ruler options
@@ -534,15 +548,31 @@ class SegmenterApp:
         objects_panel = self.layout.add_panel("objects", config)
         content = objects_panel.content
         
+        # Statistics frame (mark_text, mark_hatch, mark_line counts)
+        stats_frame = tk.Frame(content, bg=t["bg"])
+        stats_frame.pack(fill=tk.X, padx=8, pady=(8, 0))
+        
+        self.mark_text_count_label = tk.Label(stats_frame, text="Mark Text: 0", bg=t["bg"], fg=t["fg_muted"],
+                                             font=("Segoe UI", 9))
+        self.mark_text_count_label.pack(side=tk.LEFT, padx=(0, 8))
+        
+        self.mark_hatch_count_label = tk.Label(stats_frame, text="Mark Hatch: 0", bg=t["bg"], fg=t["fg_muted"],
+                                               font=("Segoe UI", 9))
+        self.mark_hatch_count_label.pack(side=tk.LEFT, padx=(0, 8))
+        
+        self.mark_line_count_label = tk.Label(stats_frame, text="Mark Line: 0", bg=t["bg"], fg=t["fg_muted"],
+                                             font=("Segoe UI", 9))
+        self.mark_line_count_label.pack(side=tk.LEFT)
+        
         # Grouping options
         group_frame = tk.Frame(content, bg=t["bg"])
         group_frame.pack(fill=tk.X, padx=8, pady=8)
         
         tk.Label(group_frame, text="Group by:", bg=t["bg"], fg=t["fg_muted"],
                 font=("Segoe UI", 9)).pack(side=tk.LEFT)
-        self.tree_grouping_var = tk.StringVar(value="none")
+        self.tree_grouping_var = tk.StringVar(value="category")
         group_combo = ttk.Combobox(group_frame, textvariable=self.tree_grouping_var,
-                                   values=["none", "category", "view"], state="readonly", width=10)
+                                   values=["category", "view"], state="readonly", width=10)
         group_combo.pack(side=tk.LEFT, padx=8)
         group_combo.bind("<<ComboboxSelected>>", lambda e: self._update_tree())
         
@@ -638,37 +668,62 @@ class SegmenterApp:
         return self.pages.get(self.current_page_id)
     
     def _get_working_image(self, page: PageTab) -> np.ndarray:
-        """Get image with text/hatch hidden if those options are enabled."""
-        image = page.original_image.copy()
+        """Get image with text/hatch/line hidden based on category visibility."""
+        # Only copy if we need to modify, otherwise use view
+        image = page.original_image.copy()  # Need copy since we'll modify pixels
         h, w = image.shape[:2]
         
-        # Apply text mask if hiding text
-        hide_text = getattr(page, 'hide_text', False)
-        if hide_text:
+        # Check category visibility (not page hide flags)
+        mark_text_cat = self.categories.get("mark_text")
+        mark_hatch_cat = self.categories.get("mark_hatch")
+        mark_line_cat = self.categories.get("mark_line")
+        
+        should_hide_text = mark_text_cat is not None and not mark_text_cat.visible
+        should_hide_hatching = mark_hatch_cat is not None and not mark_hatch_cat.visible
+        should_hide_lines = mark_line_cat is not None and not mark_line_cat.visible
+        
+        print(f"DEBUG _get_working_image: mark_text visible={mark_text_cat.visible if mark_text_cat else 'N/A'}, "
+              f"mark_hatch visible={mark_hatch_cat.visible if mark_hatch_cat else 'N/A'}, "
+              f"mark_line visible={mark_line_cat.visible if mark_line_cat else 'N/A'}")
+        
+        # Apply text mask if category is hidden
+        if should_hide_text:
             text_mask = getattr(page, 'combined_text_mask', None)
             if text_mask is not None:
                 if text_mask.shape == (h, w):
                     mask_pixels = np.sum(text_mask > 0)
-                    print(f"_get_working_image: Applying text mask with {mask_pixels} pixels")
+                    print(f"DEBUG _get_working_image: Hiding {mask_pixels} text pixels (category hidden)")
                     image[text_mask > 0] = [255, 255, 255]
                 else:
-                    print(f"_get_working_image: Text mask shape mismatch {text_mask.shape} vs {(h, w)}")
+                    print(f"DEBUG _get_working_image: Text mask shape mismatch {text_mask.shape} vs {(h, w)}")
             else:
-                print(f"_get_working_image: hide_text=True but combined_text_mask is None")
+                print(f"DEBUG _get_working_image: should_hide_text=True but combined_text_mask is None")
         
-        # Apply hatching mask if hiding hatching
-        hide_hatching = getattr(page, 'hide_hatching', False)
-        if hide_hatching:
+        # Apply hatching mask if category is hidden
+        if should_hide_hatching:
             hatch_mask = getattr(page, 'combined_hatch_mask', None)
             if hatch_mask is not None:
                 if hatch_mask.shape == (h, w):
                     mask_pixels = np.sum(hatch_mask > 0)
-                    print(f"_get_working_image: Applying hatch mask with {mask_pixels} pixels")
+                    print(f"DEBUG _get_working_image: Hiding {mask_pixels} hatch pixels (category hidden)")
                     image[hatch_mask > 0] = [255, 255, 255]
                 else:
-                    print(f"_get_working_image: Hatch mask shape mismatch {hatch_mask.shape} vs {(h, w)}")
+                    print(f"DEBUG _get_working_image: Hatch mask shape mismatch {hatch_mask.shape} vs {(h, w)}")
             else:
-                print(f"_get_working_image: hide_hatching=True but combined_hatch_mask is None")
+                print(f"DEBUG _get_working_image: should_hide_hatching=True but combined_hatch_mask is None")
+        
+        # Apply line mask if category is hidden
+        if should_hide_lines:
+            line_mask = getattr(page, 'combined_line_mask', None)
+            if line_mask is not None:
+                if line_mask.shape == (h, w):
+                    mask_pixels = np.sum(line_mask > 0)
+                    print(f"DEBUG _get_working_image: Hiding {mask_pixels} line pixels (category hidden)")
+                    image[line_mask > 0] = [255, 255, 255]
+                else:
+                    print(f"DEBUG _get_working_image: Line mask shape mismatch {line_mask.shape} vs {(h, w)}")
+            else:
+                print(f"DEBUG _get_working_image: should_hide_lines=True but combined_line_mask is None")
         
         return image
     
@@ -685,7 +740,7 @@ class SegmenterApp:
         used_categories = self._get_used_categories()
         
         # Protected categories that can never be deleted
-        protected_categories = {"planform", "textbox", "mark_text", "mark_hatch"}
+        protected_categories = {"planform", "textbox", "mark_text", "mark_hatch", "mark_line"}
         
         for name in sorted(self.categories.keys()):
             cat = self.categories[name]
@@ -753,8 +808,9 @@ class SegmenterApp:
         """Toggle visibility of a category."""
         if name in self.categories and name in self.cat_visibility_vars:
             self.categories[name].visible = self.cat_visibility_vars[name].get()
+            print(f"DEBUG: Category '{name}' visibility set to {self.categories[name].visible}")
             self.renderer.invalidate_cache()
-            self._update_display()
+            self._update_display(immediate=True)
     
     def _add_custom_category(self):
         """Add a user-defined category."""
@@ -781,6 +837,18 @@ class SegmenterApp:
         self._cancel()
         # Update status bar
         self.status_bar.set_item_text("mode", mode.capitalize())
+    
+    def _cancel(self):
+        """Cancel current operation."""
+        self.current_points.clear()
+        self.is_drawing = False
+        self.rect_start = None
+        self.rect_current = None
+        page = self._get_current_page()
+        if page and hasattr(page, 'canvas'):
+            page.canvas.delete("temp")
+            page.canvas.delete("rect")
+        self._redraw_points()
     
     def _select_category(self, name: str):
         """Select a category. Does NOT automatically change selection mode."""
@@ -1079,10 +1147,6 @@ class SegmenterApp:
         self.renderer.invalidate_cache()
         self._update_display()
     
-    def _cancel(self):
-        self.current_points.clear()
-        self.is_drawing = False
-        self._redraw_points()
     
     def _on_enter(self):
         if self.current_mode == "line" and len(self.current_points) >= 2:
@@ -1109,30 +1173,453 @@ class SegmenterApp:
         self.renderer.invalidate_cache()
         self._update_display()
     
-    def _toggle_hide_text(self):
-        """Toggle hide text for current page."""
+    def _run_ocr_for_page(self):
+        """Run OCR on current page and add new text regions to marked text list."""
         page = self._get_current_page()
         if not page:
             return
         
-        if not hasattr(page, 'hide_text'):
-            page.hide_text = False
+        self.status_var.set("Running OCR...")
+        self.root.update()
         
-        # If turning on, detect text regions first
-        if not page.hide_text:
-            if not hasattr(page, 'auto_text_regions') or not page.auto_text_regions:
-                self.status_var.set("Detecting text regions...")
-                self.root.update()
-                page.auto_text_regions = self._detect_text_regions(page)
-                self._update_combined_text_mask(page)
-                count = len(page.auto_text_regions)
-                self.status_var.set(f"Found {count} text regions - use 'Manage Manual Regions' to review")
+        # Detect text regions
+        new_regions = self._detect_text_regions(page)
         
-        page.hide_text = not page.hide_text
+        if not new_regions:
+            self.status_var.set("No text regions detected")
+            return
         
-        self._update_view_menu_labels()
+        # Get existing region IDs to avoid duplicates
+        existing_ids = set()
+        if hasattr(page, 'auto_text_regions'):
+            existing_ids.update(r.get('id', '') for r in page.auto_text_regions)
+        if hasattr(page, 'manual_text_regions'):
+            existing_ids.update(r.get('id', '') for r in page.manual_text_regions)
+        
+        # Filter out duplicates and add new regions
+        if not hasattr(page, 'auto_text_regions'):
+            page.auto_text_regions = []
+        
+        added_regions = []
+        added_count = 0
+        for region in new_regions:
+            region_id = region.get('id', '')
+            if region_id not in existing_ids:
+                page.auto_text_regions.append(region)
+                existing_ids.add(region_id)
+                added_count += 1
+                added_regions.append(region)  # Track which regions were actually added
+        
+        # Update combined mask
+        self._update_combined_text_mask(page, force_recompute=True)
+        
+        # Add regions to mark_text category as objects (use the tracked list, not slice)
+        objects_added = self._add_text_regions_to_category(page, added_regions)
+        
         self.renderer.invalidate_cache()
         self._update_display()
+        self.status_var.set(f"OCR complete: {added_count} new text regions added, {objects_added} objects created (total: {len(page.auto_text_regions)})")
+    
+    def _add_text_regions_to_category(self, page: PageTab, regions: list):
+        """Add text regions as objects in the mark_text category. Returns number of objects created."""
+        print(f"DEBUG: _add_text_regions_to_category called with {len(regions)} regions for page {page.tab_id}")
+        if not regions:
+            print("DEBUG: No regions to add")
+            return 0
+        
+        mark_text_cat = self.categories.get("mark_text")
+        if not mark_text_cat:
+            # Create mark_text category if it doesn't exist (visible by default)
+            mark_text_cat = DynamicCategory(
+                name="mark_text", prefix="mark_text", full_name="Mark as Text",
+                color_rgb=(255, 200, 0), selection_mode="flood", visible=True
+            )
+            self.categories["mark_text"] = mark_text_cat
+            self._refresh_categories()
+            print("DEBUG: Created mark_text category")
+        
+        objects_created = 0
+        masks_missing = 0
+        for region in regions:
+            region_id = region.get('id', '')
+            mask = region.get('mask')
+            text = region.get('text', f"text_{region_id}")
+            
+            if mask is None:
+                masks_missing += 1
+                print(f"DEBUG: Region {region_id} has no mask, skipping")
+                continue
+            
+            # Check if object already exists for this region
+            existing_obj = None
+            for obj in self.all_objects:
+                if obj.category == "mark_text" and obj.name == text:
+                    # Check if this instance is already on this page
+                    for inst in obj.instances:
+                        if inst.page_id == page.tab_id:
+                            # Check if this element already exists
+                            for elem in inst.elements:
+                                if elem.element_id == region_id:
+                                    existing_obj = obj
+                                    break
+                            if existing_obj:
+                                break
+                    if existing_obj:
+                        break
+            
+            if existing_obj:
+                # Add to existing object
+                for obj in self.all_objects:
+                    if obj.object_id == existing_obj.object_id:
+                        # Find or create instance for this page
+                        inst = None
+                        for i in obj.instances:
+                            if i.page_id == page.tab_id:
+                                inst = i
+                                break
+                        
+                        if not inst:
+                            inst = ObjectInstance(
+                                instance_id=f"{obj.object_id}_inst_{len(obj.instances) + 1}",
+                                instance_num=len(obj.instances) + 1,
+                                elements=[],
+                                page_id=page.tab_id,
+                                view_type=""
+                            )
+                            obj.instances.append(inst)
+                        
+                        # Add element if not already present
+                        elem_exists = any(e.element_id == region_id for e in inst.elements)
+                        if not elem_exists:
+                            elem = SegmentElement(
+                                element_id=region_id,
+                                category="mark_text",
+                                mode="auto",
+                                points=[],
+                                mask=mask,
+                                color=mark_text_cat.color_rgb,
+                                label_position="center"
+                            )
+                            inst.elements.append(elem)
+            else:
+                # Create new object
+                elem = SegmentElement(
+                    element_id=region_id,
+                    category="mark_text",
+                    mode="auto",
+                    points=[],
+                    mask=mask,
+                    color=mark_text_cat.color_rgb,
+                    label_position="center"
+                )
+                
+                inst = ObjectInstance(
+                    instance_id=f"mark_text_{region_id}_inst_1",
+                    instance_num=1,
+                    elements=[elem],
+                    page_id=page.tab_id,
+                    view_type="",
+                    attributes=ObjectAttributes()
+                )
+                
+                obj = SegmentedObject(
+                    object_id=f"mark_text_{region_id}",
+                    name=text,
+                    category="mark_text",
+                    instances=[inst]
+                )
+                
+                self.all_objects.append(obj)
+                objects_created += 1
+                print(f"DEBUG: Created mark_text object '{text}' (id={obj.object_id}) with region_id '{region_id}' on page {page.tab_id}")
+        
+        # Update tree view and workspace state
+        if objects_created > 0:
+            self.workspace_modified = True
+            self._update_tree()
+            total_mark_text = sum(1 for o in self.all_objects if o.category == 'mark_text')
+            print(f"DEBUG: Added {objects_created} mark_text objects. Total mark_text objects: {total_mark_text}")
+            print(f"DEBUG: Tree should now show {total_mark_text} mark_text objects")
+        else:
+            print(f"DEBUG: No objects created from {len(regions)} regions (masks_missing={masks_missing})")
+        return objects_created
+    
+    def _add_existing_text_regions_to_category(self, page: PageTab):
+        """Add existing text regions from workspace to mark_text category.
+        Also repairs masks for objects loaded from old workspace format."""
+        # Collect all text regions (auto + manual)
+        all_text_regions = []
+        if hasattr(page, 'auto_text_regions'):
+            all_text_regions.extend(page.auto_text_regions)
+        if hasattr(page, 'manual_text_regions'):
+            all_text_regions.extend(page.manual_text_regions)
+        
+        if not all_text_regions:
+            return
+        
+        # Ensure mark_text category exists
+        mark_text_cat = self.categories.get("mark_text")
+        if not mark_text_cat:
+            mark_text_cat = DynamicCategory(
+                name="mark_text", prefix="mark_text", full_name="Mark as Text",
+                color_rgb=(255, 200, 0), selection_mode="flood", visible=True
+            )
+            self.categories["mark_text"] = mark_text_cat
+            self._refresh_categories()
+        
+        # Build a map of region_id -> mask from auto/manual regions
+        region_masks = {}
+        for region in all_text_regions:
+            region_id = region.get('id', '')
+            mask = region.get('mask')
+            if region_id and mask is not None:
+                region_masks[region_id] = mask
+        
+        # Repair masks for existing mark_text objects that have empty masks
+        # This handles workspaces saved with old format (no RLE-encoded masks)
+        existing_element_ids = set()
+        repaired_count = 0
+        for obj in self.all_objects:
+            if obj.category == "mark_text":
+                for inst in obj.instances:
+                    if inst.page_id == page.tab_id:
+                        for elem in inst.elements:
+                            existing_element_ids.add(elem.element_id)
+                            # Check if mask is empty or None and we have a region mask to repair it
+                            if elem.mask is None or (elem.mask is not None and np.sum(elem.mask > 0) == 0):
+                                if elem.element_id in region_masks:
+                                    elem.mask = region_masks[elem.element_id]
+                                    repaired_count += 1
+        
+        if repaired_count > 0:
+            print(f"Repaired {repaired_count} empty mark_text masks from text regions")
+        
+        # Add regions that aren't already in category
+        regions_to_add = []
+        for region in all_text_regions:
+            region_id = region.get('id', '')
+            if region_id and region_id not in existing_element_ids:
+                mask = region.get('mask')
+                if mask is not None:
+                    regions_to_add.append(region)
+                    existing_element_ids.add(region_id)
+        
+        if regions_to_add:
+            self._add_text_regions_to_category(page, regions_to_add)
+    
+    def _add_existing_line_regions_to_category(self, page: PageTab):
+        """Add existing line regions from workspace to mark_line category.
+        Also repairs masks for objects loaded from old workspace format."""
+        # Collect all line regions (manual only, no auto detection for lines)
+        all_line_regions = []
+        if hasattr(page, 'manual_line_regions'):
+            all_line_regions.extend(page.manual_line_regions)
+        
+        # Even if no line regions, we should still try to repair masks from element points/mode
+        if not all_line_regions:
+            print(f"DEBUG _add_existing_line_regions: No line regions found for page {page.tab_id}, will try to reconstruct masks from element points/mode")
+        
+        print(f"DEBUG _add_existing_line_regions: Found {len(all_line_regions)} line regions for page {page.tab_id}")
+        
+        # Ensure mark_line category exists
+        mark_line_cat = self.categories.get("mark_line")
+        if not mark_line_cat:
+            mark_line_cat = DynamicCategory(
+                name="mark_line", prefix="mark_line", full_name="Mark as Leader Line",
+                color_rgb=(0, 255, 255), selection_mode="flood", visible=True
+            )
+            self.categories["mark_line"] = mark_line_cat
+            self._refresh_categories()
+        
+        # Build a map of region_id -> mask from manual regions
+        region_masks = {}
+        for region in all_line_regions:
+            region_id = region.get('id', '')
+            mask = region.get('mask')
+            if region_id and mask is not None:
+                region_masks[region_id] = mask
+        
+        # Repair masks for existing mark_line objects that have empty masks
+        existing_element_ids = set()
+        repaired_count = 0
+        print(f"DEBUG _add_existing_line_regions: Checking {len(self.all_objects)} objects for mark_line category")
+        
+        # First, find all mark_line objects on this page and check their masks
+        mark_line_objects = []
+        for obj in self.all_objects:
+            if obj.category == "mark_line":
+                for inst in obj.instances:
+                    if inst.page_id == page.tab_id:
+                        for elem in inst.elements:
+                            existing_element_ids.add(elem.element_id)
+                            mask_status = "None" if elem.mask is None else f"{np.sum(elem.mask > 0)} pixels"
+                            print(f"DEBUG: mark_line object {obj.object_id}, element {elem.element_id}: mask={mask_status}")
+                            if elem.mask is None or (elem.mask is not None and np.sum(elem.mask > 0) == 0):
+                                mark_line_objects.append((obj, inst, elem))
+        
+        print(f"DEBUG: Found {len(mark_line_objects)} mark_line objects with empty/None masks, {len(region_masks)} region masks available")
+        
+        # First, try to reconstruct masks from element points/mode if no regions available
+        if mark_line_objects and not region_masks:
+            print(f"DEBUG: No region masks available, attempting to reconstruct masks from element points/mode")
+            h, w = page.original_image.shape[:2]
+            for obj, inst, elem in mark_line_objects:
+                if elem.points and len(elem.points) >= 2 and elem.mode in ["line", "polyline", "freeform"]:
+                    # Reconstruct mask from points
+                    try:
+                        if elem.mode == "line" and len(elem.points) >= 2:
+                            mask = self.engine.create_line_mask((h, w), elem.points)
+                        elif elem.mode in ["polyline", "freeform"] and len(elem.points) >= 2:
+                            mask = self.engine.create_polygon_mask((h, w), elem.points, closed=False)
+                        else:
+                            mask = None
+                        
+                        if mask is not None and np.any(mask > 0):
+                            elem.mask = mask
+                            repaired_count += 1
+                            print(f"DEBUG: Reconstructed mask for element {elem.element_id} from {len(elem.points)} points (mode={elem.mode}, {np.sum(mask > 0)} pixels)")
+                        else:
+                            print(f"DEBUG: Could not reconstruct mask for element {elem.element_id} (mode={elem.mode}, {len(elem.points)} points)")
+                    except Exception as e:
+                        print(f"DEBUG: Error reconstructing mask for element {elem.element_id}: {e}")
+        
+        # Match region masks to elements
+        if mark_line_objects and region_masks:
+            h, w = page.original_image.shape[:2]
+            
+            # Find which region masks are already used by elements with valid masks
+            used_region_ids = set()
+            for obj in self.all_objects:
+                if obj.category == "mark_line":
+                    for inst in obj.instances:
+                        if inst.page_id == page.tab_id:
+                            for elem in inst.elements:
+                                if elem.mask is not None and np.any(elem.mask > 0):
+                                    # Check which region this mask matches (80% overlap)
+                                    for rid, rmask in region_masks.items():
+                                        if rid not in used_region_ids and rmask.shape == (h, w):
+                                            overlap = np.sum((elem.mask > 0) & (rmask > 0))
+                                            total = np.sum(rmask > 0)
+                                            if total > 0 and overlap / total > 0.8:
+                                                print(f"DEBUG: Region {rid} already used by element {elem.element_id} ({overlap}/{total} overlap)")
+                                                used_region_ids.add(rid)
+                                                break
+            
+            print(f"DEBUG: {len(used_region_ids)} region masks already in use, {len(region_masks) - len(used_region_ids)} available for repair")
+            
+            # Match elements to regions - try to match by checking if any region mask
+            # overlaps with the object's expected location or use first available
+            # Since we can't reliably match by ID, we'll assign regions in order
+            available_regions = [(rid, rmask) for rid, rmask in region_masks.items() 
+                               if rid not in used_region_ids and rmask.shape == (h, w)]
+            
+            print(f"DEBUG: {len(available_regions)} region masks available for {len(mark_line_objects)} objects needing repair")
+            
+            for idx, (obj, inst, elem) in enumerate(mark_line_objects):
+                if idx < len(available_regions):
+                    region_id, region_mask = available_regions[idx]
+                    elem.mask = region_mask.copy()
+                    repaired_count += 1
+                    used_region_ids.add(region_id)
+                    print(f"DEBUG: Repaired element {elem.element_id} (obj {obj.object_id}) with region {region_id} ({np.sum(region_mask > 0)} pixels)")
+                else:
+                    print(f"DEBUG: WARNING: Could not repair element {elem.element_id} (obj {obj.object_id}) - no available region masks ({idx+1}/{len(mark_line_objects)})")
+        
+        if repaired_count > 0:
+            print(f"DEBUG: Repaired {repaired_count} empty mark_line masks (from regions or reconstructed from points)")
+        
+        # Check for unrecoverable objects (mode="rect" with no mask data)
+        unrecoverable_objects = []
+        for obj, inst, elem in mark_line_objects:
+            if elem.mask is None or np.sum(elem.mask > 0) == 0:
+                unrecoverable_objects.append((obj, inst, elem))
+        
+        if unrecoverable_objects:
+            print(f"DEBUG: WARNING: {len(unrecoverable_objects)} mark_line objects could not be repaired:")
+            for obj, inst, elem in unrecoverable_objects:
+                has_points = elem.points and len(elem.points) >= 2
+                print(f"DEBUG:   - Element {elem.element_id} (obj {obj.object_id}, name='{obj.name}'): mode={elem.mode}, points={len(elem.points)}, UNRECOVERABLE")
+                # For mode="rect" with no mask, the object is from old workspace format and can't be recovered
+                if elem.mode == "rect" and not has_points:
+                    print(f"DEBUG:     -> This object was created with rectangle selection but saved without mask data.")
+                    print(f"DEBUG:     -> Please delete '{obj.name}' and recreate it using rectangle selection.")
+        
+        # Add regions that aren't already in category
+        regions_to_add = []
+        for region in all_line_regions:
+            region_id = region.get('id', '')
+            # Check if we already have an object for this region
+            # We'll match by checking if any element has a similar ID or if we need to create new
+            mask = region.get('mask')
+            if mask is not None and np.any(mask > 0):
+                # Check if this region is already represented in objects
+                region_already_added = False
+                for obj in self.all_objects:
+                    if obj.category == "mark_line":
+                        for inst in obj.instances:
+                            if inst.page_id == page.tab_id:
+                                for elem in inst.elements:
+                                    if elem.mask is not None and np.any(elem.mask > 0):
+                                        # Check if masks overlap significantly
+                                        overlap = np.sum((elem.mask > 0) & (mask > 0))
+                                        total = np.sum(mask > 0)
+                                        if total > 0 and overlap / total > 0.8:  # 80% overlap
+                                            region_already_added = True
+                                            break
+                                if region_already_added:
+                                    break
+                        if region_already_added:
+                            break
+                
+                if not region_already_added:
+                    regions_to_add.append(region)
+        
+        # Create objects for regions that need to be added
+        for region in regions_to_add:
+            region_id = region.get('id', '')
+            mask = region.get('mask')
+            points = region.get('points', [])
+            mode = region.get('mode', 'flood')
+            
+            if mask is not None and np.any(mask > 0):
+                # Generate element ID
+                element_id = f"mark_line_{uuid.uuid4().hex[:8]}"
+                
+                # Create element with the mask
+                elem = SegmentElement(
+                    element_id=element_id,
+                    category="mark_line",
+                    mode=mode,
+                    points=points.copy() if points else [],
+                    mask=mask.copy(),
+                    color=mark_line_cat.color_rgb,
+                    label_position="center"
+                )
+                
+                # Create instance
+                inst = ObjectInstance(
+                    instance_id=f"{element_id}_inst_1",
+                    instance_num=1,
+                    elements=[elem],
+                    page_id=page.tab_id,
+                    view_type="",
+                    attributes=ObjectAttributes()
+                )
+                
+                # Create object
+                obj = SegmentedObject(
+                    object_id=f"mark_line_{uuid.uuid4().hex[:8]}",
+                    name=f"Leader Line {region_id}",
+                    category="mark_line",
+                    instances=[inst]
+                )
+                
+                self.all_objects.append(obj)
+        
+        if regions_to_add:
+            self.workspace_modified = True
+            self._update_tree()
+            print(f"Added {len(regions_to_add)} mark_line objects from existing regions")
     
     def _toggle_hide_hatching(self):
         """Toggle hide hatching for current page."""
@@ -1168,7 +1655,7 @@ class SegmenterApp:
         # 1: Toggle Objects Panel
         # 2: separator
         # 3: Hide/Show Background
-        # 4: Hide/Show Text
+        # 4: Run OCR (no longer toggles, always runs OCR)
         # 5: Hide/Show Hatching
         # 6: separator
         # 7: Manage Mask Regions...
@@ -1180,12 +1667,6 @@ class SegmenterApp:
             self.view_menu.entryconfig(3, label="Show Background")
         else:
             self.view_menu.entryconfig(3, label="Hide Background")
-        
-        # Text toggle (index 4)
-        if page and getattr(page, 'hide_text', False):
-            self.view_menu.entryconfig(4, label="Show Text")
-        else:
-            self.view_menu.entryconfig(4, label="Hide Text")
         
         # Hatching toggle (index 5)
         if page and getattr(page, 'hide_hatching', False):
@@ -1247,10 +1728,11 @@ class SegmenterApp:
             # Get bounding boxes for detected text - use word level only
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             
-            # Use PSM 11 (sparse text) to find individual text elements
-            custom_config = r'--oem 3 --psm 11'
+            # Use PSM 3 (fully automatic page segmentation - default) to find all text elements
+            custom_config = r'--oem 3 --psm 3'
+
             data = pytesseract.image_to_data(gray, output_type=pytesseract.Output.DICT, config=custom_config)
-            
+
             region_id = 1
             n_boxes = len(data['level'])
             for i in range(n_boxes):
@@ -1260,7 +1742,7 @@ class SegmenterApp:
                     
                 # Only consider words with high confidence
                 conf = int(data['conf'][i]) if data['conf'][i] != '-1' else 0
-                if conf < 60:  # Higher confidence threshold
+                if conf < 30:  # Higher confidence threshold
                     continue
                 
                 # Only consider boxes with reasonable dimensions (not the whole image)
@@ -1297,13 +1779,11 @@ class SegmenterApp:
                     'mask': mask
                 })
                 region_id += 1
-            
+           
         except Exception as e:
             print(f"Text detection error: {e}")
         
         return regions
-        
-        return mask
     
     def _detect_hatching_regions(self, page: PageTab) -> list:
         """Detect hatching/cross-hatch pattern regions in image and return list of regions."""
@@ -1395,11 +1875,20 @@ class SegmenterApp:
             'mask': mask.copy()
         })
         
-        # Update combined text mask
-        self._update_combined_text_mask(page)
+        # Incrementally update combined text mask (much faster than full recompute)
+        if hasattr(page, 'combined_text_mask') and page.combined_text_mask is not None:
+            # Just add this mask to the existing combined mask
+            page.combined_text_mask = np.maximum(page.combined_text_mask, mask)
+            # Invalidate cache key to force update on next full recompute
+            if hasattr(page, '_text_mask_cache_key'):
+                page._text_mask_cache_key = None
+        else:
+            # First mask - just use it directly
+            page.combined_text_mask = mask.copy()
         
         self.workspace_modified = True
         self.renderer.invalidate_cache()
+        # Use debounced update for better performance
         self._update_display()
         self.status_var.set(f"Added manual text region #{region_id} ({mode})")
     
@@ -1416,16 +1905,257 @@ class SegmenterApp:
             'mask': mask.copy()
         })
         
-        # Update combined hatching mask
-        self._update_combined_hatch_mask(page)
+        # Incrementally update combined hatching mask (much faster than full recompute)
+        if hasattr(page, 'combined_hatch_mask') and page.combined_hatch_mask is not None:
+            # Just add this mask to the existing combined mask
+            page.combined_hatch_mask = np.maximum(page.combined_hatch_mask, mask)
+            # Invalidate cache key to force update on next full recompute
+            if hasattr(page, '_hatch_mask_cache_key'):
+                page._hatch_mask_cache_key = None
+        else:
+            # First mask - just use it directly
+            page.combined_hatch_mask = mask.copy()
         
         self.workspace_modified = True
         self.renderer.invalidate_cache()
+        # Use debounced update for better performance
         self._update_display()
         self.status_var.set(f"Added manual hatching region #{region_id} ({mode})")
     
-    def _update_combined_text_mask(self, page: PageTab):
-        """Combine auto-detected and manual text masks."""
+    def _detect_leader_line(self, page: PageTab, mask: np.ndarray, points: list) -> Optional[dict]:
+        """
+        Detect if a selected line is a leader line by checking:
+        1. Proximity to text regions
+        2. Arrow detection at endpoints
+        3. Line characteristics (thin, straight-ish)
+        
+        Returns dict with leader info or None if not a leader.
+        """
+        h, w = page.original_image.shape[:2]
+        
+        # Get mask pixels (for arrow detection only)
+        mask_pixels = np.where(mask > 0)
+        if len(mask_pixels[0]) == 0:
+            return None
+        
+        # Use points list first (much faster than scanning all pixels)
+        endpoints = []
+        if len(points) >= 2:
+            # Use first and last points as endpoints (most common case)
+            endpoints = [points[0], points[-1]]
+        else:
+            # Fallback: find endpoints by scanning mask (expensive, but rare)
+            for y, x in zip(mask_pixels[0], mask_pixels[1]):
+                # Count neighbors
+                neighbors = 0
+                for dy in [-1, 0, 1]:
+                    for dx in [-1, 0, 1]:
+                        if dy == 0 and dx == 0:
+                            continue
+                        ny, nx = y + dy, x + dx
+                        if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] > 0:
+                            neighbors += 1
+                if neighbors <= 1:  # Endpoint
+                    endpoints.append((x, y))
+                    if len(endpoints) >= 2:
+                        break
+        
+        if len(endpoints) < 2:
+            return None
+        
+        # Check proximity to text regions
+        text_endpoint = None
+        arrow_endpoint = None
+        min_text_dist = float('inf')
+        
+        # Get all text regions
+        all_text_regions = []
+        if hasattr(page, 'auto_text_regions'):
+            all_text_regions.extend(page.auto_text_regions)
+        if hasattr(page, 'manual_text_regions'):
+            all_text_regions.extend(page.manual_text_regions)
+        
+        # Early exit if no text regions
+        if not all_text_regions:
+            return None
+        
+        for endpoint in endpoints:
+            ex, ey = endpoint
+            # Find nearest text region
+            for region in all_text_regions:
+                region_mask = region.get('mask')
+                if region_mask is None:
+                    continue
+                
+                # Find closest point in text region
+                text_pixels = np.where(region_mask > 0)
+                if len(text_pixels[0]) > 0:
+                    # Calculate distance to text region center
+                    text_y = np.mean(text_pixels[0])
+                    text_x = np.mean(text_pixels[1])
+                    dist = np.sqrt((ex - text_x)**2 + (ey - text_y)**2)
+                    
+                    if dist < min_text_dist and dist < 100:  # Within 100 pixels
+                        min_text_dist = dist
+                        text_endpoint = endpoint
+                        # Other endpoint is likely the arrow end
+                        arrow_endpoint = endpoints[1] if endpoint == endpoints[0] else endpoints[0]
+        
+        if text_endpoint is None:
+            return None  # Not near any text, probably not a leader
+        
+        # Simple arrow detection: check for small triangular patterns at arrow endpoint
+        # This is a simplified check - could be enhanced with better arrow detection
+        has_arrow = False
+        if arrow_endpoint:
+            ax, ay = arrow_endpoint
+            # Check for small filled triangle pattern (arrowhead)
+            # Look for small triangular region near endpoint
+            arrow_region_size = 10
+            x1 = max(0, ax - arrow_region_size)
+            x2 = min(w, ax + arrow_region_size)
+            y1 = max(0, ay - arrow_region_size)
+            y2 = min(h, ay + arrow_region_size)
+            
+            # Check if there's a small filled region (arrowhead)
+            region_mask = mask[y1:y2, x1:x2]
+            if np.sum(region_mask > 0) > 20:  # Has some pixels in arrow region
+                has_arrow = True
+        
+        return {
+            'is_leader': True,
+            'text_endpoint': text_endpoint,
+            'arrow_endpoint': arrow_endpoint,
+            'has_arrow': has_arrow,
+            'text_distance': min_text_dist
+        }
+    
+    def _add_manual_line_region(self, page: PageTab, mask: np.ndarray, points: list, mode: str = "flood"):
+        """Add a manually marked leader line region."""
+        if not hasattr(page, 'manual_line_regions'):
+            page.manual_line_regions = []
+        
+        # Store the region first (defer expensive leader detection)
+        region_id = len(page.manual_line_regions) + 1
+        region_data = {
+            'id': region_id,
+            'points': points.copy() if points else [],
+            'mode': mode,
+            'mask': mask.copy(),
+            'is_leader': False,  # Will be updated asynchronously
+        }
+        
+        page.manual_line_regions.append(region_data)
+        
+        # Also create a SegmentedObject with SegmentElement (like mark_text does)
+        # This allows the object to be selected and highlighted
+        cat = self.categories.get("mark_line")
+        if not cat:
+            return
+        
+        # Generate element ID
+        element_id = f"mark_line_{uuid.uuid4().hex[:8]}"
+        
+        # Create element with the mask
+        elem = SegmentElement(
+            element_id=element_id,
+            category="mark_line",
+            mode=mode,
+            points=points.copy() if points else [],
+            mask=mask.copy(),  # Ensure we have a copy of the mask
+            color=cat.color_rgb,
+            label_position=self.label_position
+        )
+        
+        # Create instance
+        inst = ObjectInstance(
+            instance_id=f"{element_id}_inst_1",
+            instance_num=1,
+            elements=[elem],
+            page_id=page.tab_id,
+            view_type="",
+            attributes=ObjectAttributes()
+        )
+        
+        # Count existing mark_line objects to determine next number
+        mark_line_objects = [o for o in self.all_objects if o.category == "mark_line"]
+        next_number = len(mark_line_objects) + 1
+        
+        # Create object with temporary name (will be updated after leader detection)
+        obj = SegmentedObject(
+            object_id=f"mark_line_{uuid.uuid4().hex[:8]}",
+            name=f"ml-{next_number}",  # Default to ml- (will change to ll- if leader detected)
+            category="mark_line",
+            instances=[inst]
+        )
+        
+        # Add to all_objects
+        self.all_objects.append(obj)
+        self.workspace_modified = True
+        self._update_tree()
+        
+        # Update combined line mask using the centralized function
+        # This ensures all mark_line objects (from regions and from all_objects) are included
+        self._update_combined_line_mask(page, force_recompute=True)
+        
+        self.workspace_modified = True
+        self.renderer.invalidate_cache()
+        
+        # Count existing mark_line objects to determine next number
+        mark_line_objects = [o for o in self.all_objects if o.category == "mark_line"]
+        next_number = len(mark_line_objects)  # Will be updated after leader detection
+        
+        # Defer leader detection to after UI update (non-blocking)
+        def detect_leader_async():
+            leader_info = self._detect_leader_line(page, mask, points)
+            is_leader = leader_info is not None
+            
+            # Update region data
+            if leader_info:
+                region_data.update(leader_info)
+                region_data['is_leader'] = True
+            
+            # Count existing objects again (in case multiple were added quickly)
+            mark_line_objects = [o for o in self.all_objects if o.category == "mark_line"]
+            next_number = len(mark_line_objects)
+            
+            # Update object name based on leader detection
+            if is_leader:
+                obj.name = f"ll-{next_number}"
+                self.status_var.set(f"Added leader line ll-{next_number} (text at {leader_info['text_endpoint']}, arrow: {leader_info['has_arrow']})")
+            else:
+                obj.name = f"ml-{next_number}"
+                self.status_var.set(f"Added line region ml-{next_number} (not detected as leader)")
+            
+            # Update tree to reflect new name
+            self._update_tree()
+        
+        # Schedule leader detection after UI update
+        self.root.after(100, detect_leader_async)
+        
+        # Use debounced update for better performance (matches text/hatch)
+        self._update_display()
+        self.status_var.set(f"Added line region #{region_id} ({mode})")
+    
+    def _update_combined_text_mask(self, page: PageTab, force_recompute: bool = False):
+        """
+        Combine auto-detected and manual text masks with caching.
+        
+        Args:
+            page: Page to update
+            force_recompute: If True, recompute even if cached
+        """
+        # Check if we have a cached version and regions haven't changed
+        cache_key = f"text_mask_{page.tab_id}"
+        if not force_recompute and hasattr(page, '_text_mask_cache_key'):
+            # Check if regions have changed
+            auto_count = len(getattr(page, 'auto_text_regions', []))
+            manual_count = len(getattr(page, 'manual_text_regions', []))
+            current_key = f"{auto_count}_{manual_count}"
+            if page._text_mask_cache_key == current_key and hasattr(page, 'combined_text_mask'):
+                # Cache is valid, skip recomputation
+                return
+        
         h, w = page.original_image.shape[:2]
         combined = np.zeros((h, w), dtype=np.uint8)
         
@@ -1434,13 +2164,16 @@ class SegmenterApp:
         auto_pixels = 0
         manual_pixels = 0
         
+        # Collect all masks first, then combine in one operation (faster than loop with np.maximum)
+        all_masks = []
+        
         # Add auto-detected regions
         if hasattr(page, 'auto_text_regions'):
             for region in page.auto_text_regions:
                 mask = region.get('mask')
                 if mask is not None:
                     if mask.shape == (h, w):
-                        combined = np.maximum(combined, mask)
+                        all_masks.append(mask)
                         auto_count += 1
                         auto_pixels += np.sum(mask > 0)
                     else:
@@ -1452,19 +2185,51 @@ class SegmenterApp:
                 mask = region.get('mask')
                 if mask is not None:
                     if mask.shape == (h, w):
-                        combined = np.maximum(combined, mask)
+                        all_masks.append(mask)
                         manual_count += 1
                         manual_pixels += np.sum(mask > 0)
                     else:
                         print(f"Manual text mask shape mismatch: {mask.shape} vs expected {(h, w)}")
         
-        page.combined_text_mask = combined
+        # Combine all masks (use batch processing for large numbers to avoid memory issues)
+        if all_masks:
+            # For large numbers of masks, process in batches to avoid memory allocation errors
+            # With 644 masks of size (555, 4500), stacking all at once would require ~15GB
+            batch_size = 100  # Process 100 masks at a time
+            for i in range(0, len(all_masks), batch_size):
+                batch = all_masks[i:i+batch_size]
+                # Use iterative np.maximum instead of np.stack to save memory
+                # This avoids creating a large intermediate array
+                for mask in batch:
+                    combined = np.maximum(combined, mask)
+            combined = combined.astype(np.uint8)
+        
         total_pixels = np.sum(combined > 0)
+        # Store cache key and combined mask
+        page._text_mask_cache_key = f"{auto_count}_{manual_count}"
+        page.combined_text_mask = combined
+        
         print(f"_update_combined_text_mask: auto={auto_count} ({auto_pixels}px), "
               f"manual={manual_count} ({manual_pixels}px), combined={total_pixels}px")
     
-    def _update_combined_hatch_mask(self, page: PageTab):
-        """Combine auto-detected and manual hatching masks."""
+    def _update_combined_hatch_mask(self, page: PageTab, force_recompute: bool = False):
+        """
+        Combine auto-detected and manual hatching masks with caching.
+        
+        Args:
+            page: Page to update
+            force_recompute: If True, recompute even if cached
+        """
+        # Check if we have a cached version and regions haven't changed
+        if not force_recompute and hasattr(page, '_hatch_mask_cache_key'):
+            # Check if regions have changed
+            auto_count = len(getattr(page, 'auto_hatch_regions', []))
+            manual_count = len(getattr(page, 'manual_hatch_regions', []))
+            current_key = f"{auto_count}_{manual_count}"
+            if page._hatch_mask_cache_key == current_key and hasattr(page, 'combined_hatch_mask'):
+                # Cache is valid, skip recomputation
+                return
+        
         h, w = page.original_image.shape[:2]
         combined = np.zeros((h, w), dtype=np.uint8)
         
@@ -1473,13 +2238,16 @@ class SegmenterApp:
         auto_pixels = 0
         manual_pixels = 0
         
+        # Collect all masks first, then combine in one operation (faster than loop with np.maximum)
+        all_masks = []
+        
         # Add auto-detected regions
         if hasattr(page, 'auto_hatch_regions'):
             for region in page.auto_hatch_regions:
                 mask = region.get('mask')
                 if mask is not None:
                     if mask.shape == (h, w):
-                        combined = np.maximum(combined, mask)
+                        all_masks.append(mask)
                         auto_count += 1
                         auto_pixels += np.sum(mask > 0)
                     else:
@@ -1491,235 +2259,139 @@ class SegmenterApp:
                 mask = region.get('mask')
                 if mask is not None:
                     if mask.shape == (h, w):
-                        combined = np.maximum(combined, mask)
+                        all_masks.append(mask)
                         manual_count += 1
                         manual_pixels += np.sum(mask > 0)
                     else:
                         print(f"Manual hatch mask shape mismatch: {mask.shape} vs expected {(h, w)}")
         
-        page.combined_hatch_mask = combined
+        # Combine all masks (use batch processing for large numbers to avoid memory issues)
+        if all_masks:
+            # For large numbers of masks, process in batches to avoid memory allocation errors
+            batch_size = 100  # Process 100 masks at a time
+            for i in range(0, len(all_masks), batch_size):
+                batch = all_masks[i:i+batch_size]
+                # Use iterative np.maximum instead of np.stack to save memory
+                # This avoids creating a large intermediate array
+                for mask in batch:
+                    combined = np.maximum(combined, mask)
+            combined = combined.astype(np.uint8)
+        
         total_pixels = np.sum(combined > 0)
+        # Store cache key and combined mask
+        page._hatch_mask_cache_key = f"{auto_count}_{manual_count}"
+        page.combined_hatch_mask = combined
+        
         print(f"_update_combined_hatch_mask: auto={auto_count} ({auto_pixels}px), "
               f"manual={manual_count} ({manual_pixels}px), combined={total_pixels}px")
     
-    def _remove_manual_text_region(self, page: PageTab, region_id):
+    def _update_combined_line_mask(self, page: PageTab, force_recompute: bool = False):
+        """
+        Combine all mark_line object masks into combined_line_mask.
+        
+        This includes masks from:
+        - manual_line_regions (for backward compatibility)
+        - All mark_line objects in all_objects (for objects created via rectangle/polyline)
+        
+        Args:
+            page: Page to update
+            force_recompute: If True, recompute even if cached
+        """
+        h, w = page.original_image.shape[:2]
+        combined = np.zeros((h, w), dtype=np.uint8)
+        
+        region_count = 0
+        object_count = 0
+        region_pixels = 0
+        object_pixels = 0
+        
+        # Collect all masks first, then combine in one operation (faster than loop with np.maximum)
+        all_masks = []
+        
+        # Add masks from manual_line_regions (for backward compatibility)
+        if hasattr(page, 'manual_line_regions'):
+            for region in page.manual_line_regions:
+                mask = region.get('mask')
+                if mask is not None:
+                    if mask.shape == (h, w):
+                        all_masks.append(mask)
+                        region_count += 1
+                        region_pixels += np.sum(mask > 0)
+                    else:
+                        print(f"Line region mask shape mismatch: {mask.shape} vs expected {(h, w)}")
+        
+        # Add masks from all mark_line objects on this page
+        for obj in self.all_objects:
+            if obj.category == "mark_line":
+                for inst in obj.instances:
+                    if inst.page_id == page.tab_id:
+                        for elem in inst.elements:
+                            if elem.mask is not None:
+                                if elem.mask.shape == (h, w):
+                                    all_masks.append(elem.mask)
+                                    object_count += 1
+                                    object_pixels += np.sum(elem.mask > 0)
+                                else:
+                                    print(f"Mark_line object mask shape mismatch: {elem.mask.shape} vs expected {(h, w)}")
+        
+        # Combine all masks (use batch processing for large numbers to avoid memory issues)
+        if all_masks:
+            # For large numbers of masks, process in batches to avoid memory allocation errors
+            batch_size = 50
+            for i in range(0, len(all_masks), batch_size):
+                batch = all_masks[i:i + batch_size]
+                batch_combined = np.maximum.reduce(batch)
+                combined = np.maximum(combined, batch_combined)
+        else:
+            # No masks - set to None to indicate no lines to hide
+            combined = None
+        
+        page.combined_line_mask = combined
+        
+        total_pixels = region_pixels + object_pixels
+        print(f"_update_combined_line_mask: regions={region_count} ({region_pixels}px), "
+              f"objects={object_count} ({object_pixels}px), combined={total_pixels}px")
+    
+    def _remove_manual_text_region(self, page: PageTab, region_id: str, update_display: bool = True):
         """Remove a manual text region by ID."""
         if hasattr(page, 'manual_text_regions'):
             page.manual_text_regions = [r for r in page.manual_text_regions if r['id'] != region_id]
-            self._update_combined_text_mask(page)
             self.workspace_modified = True
-            self.renderer.invalidate_cache()
-            self._update_display()
+            if update_display:
+                self._update_combined_text_mask(page)
+                self.renderer.invalidate_cache()
+                self._update_display()
     
-    def _remove_auto_text_region(self, page: PageTab, region_id: str):
+    def _remove_auto_text_region(self, page: PageTab, region_id: str, update_display: bool = True):
         """Remove an auto-detected text region by ID."""
         if hasattr(page, 'auto_text_regions'):
             page.auto_text_regions = [r for r in page.auto_text_regions if r['id'] != region_id]
-            self._update_combined_text_mask(page)
             self.workspace_modified = True
-            self.renderer.invalidate_cache()
-            self._update_display()
+            if update_display:
+                self._update_combined_text_mask(page)
+                self.renderer.invalidate_cache()
+                self._update_display()
     
-    def _remove_manual_hatch_region(self, page: PageTab, region_id):
+    def _remove_manual_hatch_region(self, page: PageTab, region_id: str, update_display: bool = True):
         """Remove a manual hatching region by ID."""
         if hasattr(page, 'manual_hatch_regions'):
             page.manual_hatch_regions = [r for r in page.manual_hatch_regions if r['id'] != region_id]
-            self._update_combined_hatch_mask(page)
             self.workspace_modified = True
-            self.renderer.invalidate_cache()
-            self._update_display()
+            if update_display:
+                self._update_combined_hatch_mask(page)
+                self.renderer.invalidate_cache()
+                self._update_display()
     
-    def _remove_auto_hatch_region(self, page: PageTab, region_id: str):
+    def _remove_auto_hatch_region(self, page: PageTab, region_id: str, update_display: bool = True):
         """Remove an auto-detected hatching region by ID."""
         if hasattr(page, 'auto_hatch_regions'):
             page.auto_hatch_regions = [r for r in page.auto_hatch_regions if r['id'] != region_id]
-            self._update_combined_hatch_mask(page)
             self.workspace_modified = True
-            self.renderer.invalidate_cache()
-            self._update_display()
+            if update_display:
+                self._update_combined_hatch_mask(page)
+                self.renderer.invalidate_cache()
+                self._update_display()
     
-    def _show_mask_regions_dialog(self):
-        """Show dialog to manage text/hatching regions (auto-detected + manual)."""
-        page = self._get_current_page()
-        if not page:
-            return
-        
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Manage Mask Regions")
-        dialog.geometry("500x550")
-        dialog.transient(self.root)
-        
-        # Position relative to main window
-        x = self.root.winfo_x() + 50
-        y = self.root.winfo_y() + 50
-        dialog.geometry(f"+{x}+{y}")
-        
-        # Store highlight state
-        self._mask_highlight_masks = []
-        
-        def get_region_mask(source: str, region_id: str, region_type: str) -> np.ndarray:
-            """Get mask for a region by source and ID."""
-            if region_type == 'text':
-                if source == 'auto' and hasattr(page, 'auto_text_regions'):
-                    for r in page.auto_text_regions:
-                        if r['id'] == region_id:
-                            return r.get('mask')
-                elif source == 'manual' and hasattr(page, 'manual_text_regions'):
-                    for r in page.manual_text_regions:
-                        if r['id'] == region_id:
-                            return r.get('mask')
-            else:  # hatching
-                if source == 'auto' and hasattr(page, 'auto_hatch_regions'):
-                    for r in page.auto_hatch_regions:
-                        if r['id'] == region_id:
-                            return r.get('mask')
-                elif source == 'manual' and hasattr(page, 'manual_hatch_regions'):
-                    for r in page.manual_hatch_regions:
-                        if r['id'] == region_id:
-                            return r.get('mask')
-            return None
-        
-        def highlight_selected_regions(regions_data: list, listbox: tk.Listbox, region_type: str):
-            """Highlight selected regions on the image."""
-            self._mask_highlight_masks = []
-            selections = listbox.curselection()
-            for idx in selections:
-                if idx < len(regions_data):
-                    source, region_id = regions_data[idx]
-                    mask = get_region_mask(source, region_id, region_type)
-                    if mask is not None:
-                        self._mask_highlight_masks.append(mask)
-            self._update_display_with_mask_highlight()
-        
-        def clear_highlight():
-            """Clear mask highlights."""
-            self._mask_highlight_masks = []
-            self._update_display()
-        
-        notebook = ttk.Notebook(dialog)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # ===== Text regions tab =====
-        text_frame = ttk.Frame(notebook)
-        notebook.add(text_frame, text="Text Regions")
-        
-        # Store combined list with type tracking
-        text_regions_data = []  # List of (source, region_id)
-        
-        text_listbox = tk.Listbox(text_frame, height=15, selectmode=tk.EXTENDED)
-        text_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text_listbox.yview)
-        text_listbox.configure(yscrollcommand=text_scroll.set)
-        
-        text_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 5), pady=5)
-        text_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Populate: auto-detected first
-        if hasattr(page, 'auto_text_regions'):
-            for region in page.auto_text_regions:
-                text = region.get('text', '?')[:20]
-                conf = region.get('confidence', 0)
-                bbox = region.get('bbox', (0, 0, 0, 0))
-                display = f"[AUTO] \"{text}\" ({conf}% conf) at ({bbox[0]}, {bbox[1]})"
-                text_listbox.insert(tk.END, display)
-                text_regions_data.append(('auto', region['id']))
-        
-        # Then manual
-        if hasattr(page, 'manual_text_regions'):
-            for region in page.manual_text_regions:
-                mode = region.get('mode', 'flood')
-                pt = region.get('point', (0, 0))
-                display = f"[MANUAL] #{region['id']} [{mode}] at ({pt[0]}, {pt[1]})"
-                text_listbox.insert(tk.END, display)
-                text_regions_data.append(('manual', region['id']))
-        
-        # Bind selection event for highlighting
-        text_listbox.bind('<<ListboxSelect>>', 
-                          lambda e: highlight_selected_regions(text_regions_data, text_listbox, 'text'))
-        
-        def delete_text_regions():
-            selections = list(text_listbox.curselection())
-            if not selections:
-                return
-            # Process in reverse order to maintain indices
-            for idx in sorted(selections, reverse=True):
-                if idx < len(text_regions_data):
-                    source, region_id = text_regions_data[idx]
-                    if source == 'auto':
-                        self._remove_auto_text_region(page, region_id)
-                    else:
-                        self._remove_manual_text_region(page, region_id)
-                    text_listbox.delete(idx)
-                    text_regions_data.pop(idx)
-            clear_highlight()
-        
-        btn_frame = ttk.Frame(text_frame)
-        btn_frame.pack(fill=tk.X, pady=5)
-        ttk.Button(btn_frame, text="Delete Selected", command=delete_text_regions).pack(side=tk.LEFT, padx=5)
-        ttk.Label(btn_frame, text=f"Total: {len(text_regions_data)} regions").pack(side=tk.RIGHT, padx=5)
-        
-        # ===== Hatching regions tab =====
-        hatch_frame = ttk.Frame(notebook)
-        notebook.add(hatch_frame, text="Hatching Regions")
-        
-        hatch_regions_data = []  # List of (source, region_id)
-        
-        hatch_listbox = tk.Listbox(hatch_frame, height=15, selectmode=tk.EXTENDED)
-        hatch_scroll = ttk.Scrollbar(hatch_frame, orient=tk.VERTICAL, command=hatch_listbox.yview)
-        hatch_listbox.configure(yscrollcommand=hatch_scroll.set)
-        
-        hatch_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 5), pady=5)
-        hatch_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Populate: auto-detected first
-        if hasattr(page, 'auto_hatch_regions'):
-            for region in page.auto_hatch_regions:
-                bbox = region.get('bbox', (0, 0, 0, 0))
-                area = region.get('area', 0)
-                display = f"[AUTO] #{region['id']} area={area}px at ({bbox[0]}, {bbox[1]})"
-                hatch_listbox.insert(tk.END, display)
-                hatch_regions_data.append(('auto', region['id']))
-        
-        # Then manual
-        if hasattr(page, 'manual_hatch_regions'):
-            for region in page.manual_hatch_regions:
-                mode = region.get('mode', 'flood')
-                pt = region.get('point', (0, 0))
-                display = f"[MANUAL] #{region['id']} [{mode}] at ({pt[0]}, {pt[1]})"
-                hatch_listbox.insert(tk.END, display)
-                hatch_regions_data.append(('manual', region['id']))
-        
-        # Bind selection event for highlighting
-        hatch_listbox.bind('<<ListboxSelect>>', 
-                           lambda e: highlight_selected_regions(hatch_regions_data, hatch_listbox, 'hatch'))
-        
-        def delete_hatch_regions():
-            selections = list(hatch_listbox.curselection())
-            if not selections:
-                return
-            for idx in sorted(selections, reverse=True):
-                if idx < len(hatch_regions_data):
-                    source, region_id = hatch_regions_data[idx]
-                    if source == 'auto':
-                        self._remove_auto_hatch_region(page, region_id)
-                    else:
-                        self._remove_manual_hatch_region(page, region_id)
-                    hatch_listbox.delete(idx)
-                    hatch_regions_data.pop(idx)
-            clear_highlight()
-        
-        hatch_btn_frame = ttk.Frame(hatch_frame)
-        hatch_btn_frame.pack(fill=tk.X, pady=5)
-        ttk.Button(hatch_btn_frame, text="Delete Selected", command=delete_hatch_regions).pack(side=tk.LEFT, padx=5)
-        ttk.Label(hatch_btn_frame, text=f"Total: {len(hatch_regions_data)} regions").pack(side=tk.RIGHT, padx=5)
-        
-        # Clear highlight when switching tabs
-        notebook.bind('<<NotebookTabChanged>>', lambda e: clear_highlight())
-        
-        # Clear highlight when dialog closes
-        dialog.protocol("WM_DELETE_WINDOW", lambda: (clear_highlight(), dialog.destroy()))
-        
-        # Close button
-        ttk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=10)
     
     # Page management
     def _add_page(self, page: PageTab, from_workspace: bool = False):
@@ -1869,6 +2541,12 @@ class SegmenterApp:
             self._select_at(x, y)
         elif self.current_mode == "flood":
             self._flood_fill(x, y)
+        elif self.current_mode == "rect":
+            # Start rectangle selection
+            self.rect_start = (x, y)
+            self.rect_current = (x, y)
+            self.is_drawing = True
+            self._redraw_rectangle()
         elif self.current_mode in ["polyline", "line"]:
             # Check snap
             if self.current_mode == "polyline" and len(self.current_points) >= 3:
@@ -1892,13 +2570,21 @@ class SegmenterApp:
             self._redraw_points()
     
     def _on_drag(self, event):
-        if self.current_mode == "freeform" and self.is_drawing:
+        if self.current_mode == "rect" and self.is_drawing and self.rect_start:
+            x, y = self._canvas_to_image(event.x, event.y)
+            self.rect_current = (x, y)
+            self._redraw_rectangle()
+        elif self.current_mode == "freeform" and self.is_drawing:
             x, y = self._canvas_to_image(event.x, event.y)
             self.current_points.append((x, y))
             self._redraw_points()
     
     def _on_release(self, event):
-        if self.current_mode == "freeform" and self.is_drawing:
+        if self.current_mode == "rect" and self.is_drawing and self.rect_start and self.rect_current:
+            x, y = self._canvas_to_image(event.x, event.y)
+            self.rect_current = (x, y)
+            self._finish_rectangle()
+        elif self.current_mode == "freeform" and self.is_drawing:
             self.is_drawing = False
             if len(self.current_points) >= 2:
                 self._finish_freeform()
@@ -1972,6 +2658,18 @@ class SegmenterApp:
         # Get image with text/hatch hidden if those options are enabled
         working_image = self._get_working_image(page)
         
+        # Always exclude line regions from flood fill to prevent selecting through leaders
+        # This prevents flood fill from incorrectly including objects intersected by leader lines
+        if hasattr(page, 'combined_line_mask') and page.combined_line_mask is not None:
+            # Temporarily mask out line regions from the working image
+            line_mask = page.combined_line_mask
+            h_img, w_img = working_image.shape[:2]
+            # Ensure mask shape matches image shape
+            if isinstance(line_mask, np.ndarray) and line_mask.shape == (h_img, w_img):
+                # Set line regions to white (same as background) so flood fill won't cross them
+                working_image = working_image.copy()
+                working_image[line_mask > 0] = [255, 255, 255]
+        
         mask = self.engine.flood_fill(working_image, (x, y))
         if np.sum(mask) == 0:
             return
@@ -1982,6 +2680,12 @@ class SegmenterApp:
             return
         elif cat_name == "mark_hatch":
             self._add_manual_hatch_region(page, mask, (x, y), "flood")
+            return
+        elif cat_name == "mark_line":
+            # For mark_line, we need to get points from the selection
+            # Since flood fill doesn't give us points, we'll use the seed point
+            points = [(x, y)]  # Start with seed point
+            self._add_manual_line_region(page, mask, points, "flood")
             return
         
         elem = SegmentElement(
@@ -2010,6 +2714,16 @@ class SegmenterApp:
             return
         elif cat_name == "mark_hatch":
             self._add_manual_hatch_region(page, mask, self.current_points[0], "polyline")
+            self.current_points.clear()
+            self._redraw_points()
+            return
+        elif cat_name == "mark_line":
+            # For polyline selection, detect the actual object within the polyline area
+            # and replace the mask with the detected object shape
+            detected_mask = self._detect_object_in_polyline(page, mask)
+            if detected_mask is not None:
+                mask = detected_mask
+            self._add_manual_line_region(page, mask, list(self.current_points), "polyline")
             self.current_points.clear()
             self._redraw_points()
             return
@@ -2076,6 +2790,11 @@ class SegmenterApp:
             return
         elif cat_name == "mark_hatch":
             self._add_manual_hatch_region(page, mask, self.current_points[0], "line")
+            self.current_points.clear()
+            self._redraw_points()
+            return
+        elif cat_name == "mark_line":
+            self._add_manual_line_region(page, mask, list(self.current_points), "line")
             self.current_points.clear()
             self._redraw_points()
             return
@@ -2167,7 +2886,30 @@ class SegmenterApp:
                 result.append(obj)
         return result
     
-    def _update_display(self):
+    def _update_display(self, immediate: bool = False):
+        """
+        Update the display with debouncing for performance.
+        
+        Args:
+            immediate: If True, update immediately without debouncing
+        """
+        # Cancel any pending update
+        if self._update_display_timer_id is not None:
+            self.root.after_cancel(self._update_display_timer_id)
+            self._update_display_timer_id = None
+        
+        if immediate:
+            self._do_update_display()
+        else:
+            # Debounce: wait 50ms before updating (cancels previous if called again)
+            self._update_display_pending = True
+            self._update_display_timer_id = self.root.after(50, self._do_update_display)
+    
+    def _do_update_display(self):
+        """Internal method that actually performs the display update."""
+        self._update_display_pending = False
+        self._update_display_timer_id = None
+        
         page = self._get_current_page()
         if not page or page.original_image is None or not hasattr(page, 'canvas'):
             return
@@ -2178,36 +2920,116 @@ class SegmenterApp:
         # Get page-specific view settings
         hide_background = getattr(page, 'hide_background', False)
         
-        # Get text mask if hiding text (use combined mask if available)
+        # Get category visibility settings
+        mark_text_cat = self.categories.get("mark_text")
+        mark_hatch_cat = self.categories.get("mark_hatch")
+        mark_line_cat = self.categories.get("mark_line")
+        
+        should_hide_text = mark_text_cat is not None and not mark_text_cat.visible
+        should_hide_hatching = mark_hatch_cat is not None and not mark_hatch_cat.visible
+        should_hide_lines = mark_line_cat is not None and not mark_line_cat.visible
+        
+        # Build set of selected object IDs for mark_* categories that need highlighting
+        selected_mark_obj_ids = set()
+        for obj_id in self.selected_object_ids:
+            obj = self._get_object_by_id(obj_id)
+            if obj and obj.category in ["mark_text", "mark_hatch", "mark_line"]:
+                selected_mark_obj_ids.add(obj_id)
+        
+        # Also check if any selected instance/element belongs to a mark_* object
+        for obj in page_objects:
+            if obj.category in ["mark_text", "mark_hatch", "mark_line"]:
+                for inst in obj.instances:
+                    if inst.instance_id in self.selected_instance_ids:
+                        selected_mark_obj_ids.add(obj.object_id)
+                    for elem in inst.elements:
+                        if elem.element_id in self.selected_element_ids:
+                            selected_mark_obj_ids.add(obj.object_id)
+        
+        # Filter out mark_text/hatch/line objects for rendering (don't draw fill)
+        # BUT keep them if they're selected (so they can be highlighted)
+        render_objects = []
+        for obj in page_objects:
+            if obj.category == "mark_text":
+                # Only include if selected (for highlighting), regardless of category visibility
+                if obj.object_id in selected_mark_obj_ids:
+                    render_objects.append(obj)
+                    # Debug: check if masks exist
+                    has_mask = any(
+                        elem.mask is not None and np.any(elem.mask > 0)
+                        for inst in obj.instances
+                        for elem in inst.elements
+                    )
+                    if not has_mask:
+                        print(f"WARNING: mark_text object {obj.object_id} selected but has no valid mask")
+            elif obj.category == "mark_hatch":
+                # Only include if selected (for highlighting), regardless of category visibility
+                if obj.object_id in selected_mark_obj_ids:
+                    render_objects.append(obj)
+            elif obj.category == "mark_line":
+                # Only include if selected (for highlighting), regardless of category visibility
+                if obj.object_id in selected_mark_obj_ids:
+                    render_objects.append(obj)
+                    # Debug: check if masks exist
+                    mask_info = []
+                    for inst in obj.instances:
+                        for elem in inst.elements:
+                            if elem.mask is None:
+                                mask_info.append(f"{elem.element_id}: None")
+                            elif np.sum(elem.mask > 0) == 0:
+                                mask_info.append(f"{elem.element_id}: empty")
+                            else:
+                                mask_info.append(f"{elem.element_id}: {np.sum(elem.mask > 0)} pixels")
+                    
+                    has_mask = any(
+                        elem.mask is not None and np.any(elem.mask > 0)
+                        for inst in obj.instances
+                        for elem in inst.elements
+                    )
+                    if not has_mask:
+                        print(f"DEBUG WARNING: mark_line object {obj.object_id} selected but has no valid mask. Masks: {', '.join(mask_info)}")
+                    else:
+                        print(f"DEBUG: mark_line object {obj.object_id} selected with valid masks: {', '.join(mask_info)}")
+            else:
+                # Include all other objects normally
+                render_objects.append(obj)
+        
+        # Debug output
+        if selected_mark_obj_ids:
+            print(f"DEBUG: Selected mark objects: {selected_mark_obj_ids}")
+            print(f"DEBUG: Render objects count: {len(render_objects)}, mark objects in render: {sum(1 for o in render_objects if o.category in ['mark_text', 'mark_hatch', 'mark_line'])}")
+        
+        # Get text mask if hiding text (only when category is unchecked)
         text_mask = None
-        hide_text = getattr(page, 'hide_text', False)
-        if hide_text:
+        if should_hide_text:
             if hasattr(page, 'combined_text_mask') and page.combined_text_mask is not None:
                 text_mask = page.combined_text_mask
-                print(f"_update_display: Using combined_text_mask with {np.sum(text_mask > 0)} pixels")
             elif hasattr(page, 'text_mask') and page.text_mask is not None:
                 text_mask = page.text_mask
-                print(f"_update_display: Using text_mask with {np.sum(text_mask > 0)} pixels")
-            else:
-                print(f"_update_display: hide_text=True but NO MASK FOUND!")
         
-        # Get hatching mask if hiding hatching (use combined mask if available)
+        # Get hatching mask if hiding hatching
         hatching_mask = None
-        hide_hatching = getattr(page, 'hide_hatching', False)
-        if hide_hatching:
+        if should_hide_hatching:
             if hasattr(page, 'combined_hatch_mask') and page.combined_hatch_mask is not None:
                 hatching_mask = page.combined_hatch_mask
             elif hasattr(page, 'hatching_mask') and page.hatching_mask is not None:
                 hatching_mask = page.hatching_mask
+        
+        # Get line mask if hiding lines (only when category is unchecked)
+        line_mask = None
+        if should_hide_lines:
+            if hasattr(page, 'combined_line_mask') and page.combined_line_mask is not None:
+                line_mask = page.combined_line_mask
         
         rendered = self.renderer.render_page(
             page, self.categories, self.zoom_level, self.show_labels,
             self.selected_object_ids, self.selected_instance_ids, self.selected_element_ids,
             self.settings.planform_opacity, self.group_mode_elements,
             hide_background=hide_background,
-            objects=page_objects,
+            objects=render_objects,
             text_mask=text_mask,
-            hatching_mask=hatching_mask
+            hatching_mask=hatching_mask,
+            line_mask=line_mask
         )
         
         pil_img = Image.fromarray(cv2.cvtColor(rendered, cv2.COLOR_BGRA2RGBA))
@@ -2226,70 +3048,6 @@ class SegmenterApp:
         
         # Update rulers
         self._draw_rulers(page)
-    
-    def _update_display_with_mask_highlight(self):
-        """Update display with temporary mask region highlights."""
-        page = self._get_current_page()
-        if not page or page.original_image is None or not hasattr(page, 'canvas'):
-            return
-        
-        # First do normal render
-        page_objects = self._get_objects_for_page(page.tab_id)
-        hide_background = getattr(page, 'hide_background', False)
-        
-        text_mask = None
-        if getattr(page, 'hide_text', False):
-            if hasattr(page, 'combined_text_mask') and page.combined_text_mask is not None:
-                text_mask = page.combined_text_mask
-        
-        hatching_mask = None
-        if getattr(page, 'hide_hatching', False):
-            if hasattr(page, 'combined_hatch_mask') and page.combined_hatch_mask is not None:
-                hatching_mask = page.combined_hatch_mask
-        
-        rendered = self.renderer.render_page(
-            page, self.categories, self.zoom_level, self.show_labels,
-            self.selected_object_ids, self.selected_instance_ids, self.selected_element_ids,
-            self.settings.planform_opacity, self.group_mode_elements,
-            hide_background=hide_background,
-            objects=page_objects,
-            text_mask=text_mask,
-            hatching_mask=hatching_mask
-        )
-        
-        # Now overlay highlight for selected mask regions
-        if hasattr(self, '_mask_highlight_masks') and self._mask_highlight_masks:
-            h, w = rendered.shape[:2]
-            zoom = self.zoom_level
-            
-            for mask in self._mask_highlight_masks:
-                if mask is None:
-                    continue
-                
-                # Resize mask to match zoomed image
-                mask_resized = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-                
-                # Create yellow semi-transparent overlay
-                overlay = np.zeros((h, w, 4), dtype=np.uint8)
-                overlay[mask_resized > 0] = [0, 255, 255, 100]  # Yellow with alpha
-                
-                # Blend overlay
-                alpha = overlay[:, :, 3:4] / 255.0
-                rendered[:, :, :3] = (rendered[:, :, :3] * (1 - alpha) + 
-                                      overlay[:, :, :3] * alpha).astype(np.uint8)
-                
-                # Draw contour in bright yellow
-                contours, _ = cv2.findContours(mask_resized, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                cv2.drawContours(rendered, contours, -1, (0, 255, 255, 255), 2)
-        
-        pil_img = Image.fromarray(cv2.cvtColor(rendered, cv2.COLOR_BGRA2RGBA))
-        page.tk_image = ImageTk.PhotoImage(pil_img)
-        
-        page.canvas.delete("all")
-        page.canvas.create_image(0, 0, anchor=tk.NW, image=page.tk_image)
-        page.canvas.configure(scrollregion=(0, 0, rendered.shape[1], rendered.shape[0]))
-        
-        self._redraw_points()
     
     def _redraw_points(self):
         page = self._get_current_page()
@@ -2318,14 +3076,480 @@ class SegmenterApp:
                 page.canvas.create_line(scaled[i][0], scaled[i][1], scaled[i+1][0], scaled[i+1][1],
                                         fill="yellow", width=2, tags="temp")
     
+    def _redraw_rectangle(self):
+        """Draw rectangle preview on canvas."""
+        page = self._get_current_page()
+        if not page or not hasattr(page, 'canvas') or not self.rect_start or not self.rect_current:
+            return
+        
+        page.canvas.delete("rect")
+        
+        x1, y1 = self.rect_start
+        x2, y2 = self.rect_current
+        
+        # Scale to canvas coordinates
+        sx1 = int(x1 * self.zoom_level)
+        sy1 = int(y1 * self.zoom_level)
+        sx2 = int(x2 * self.zoom_level)
+        sy2 = int(y2 * self.zoom_level)
+        
+        # Draw rectangle outline
+        self.rect_id = page.canvas.create_rectangle(
+            sx1, sy1, sx2, sy2,
+            outline="cyan", width=2, dash=(4, 2), tags="rect"
+        )
+    
+    def _finish_rectangle(self):
+        """Finish rectangle selection and detect objects."""
+        page = self._get_current_page()
+        if not page or not self.rect_start or not self.rect_current:
+            return
+        
+        # Clear rectangle preview
+        if page and hasattr(page, 'canvas'):
+            page.canvas.delete("rect")
+        
+        x1, y1 = self.rect_start
+        x2, y2 = self.rect_current
+        
+        # Normalize rectangle coordinates
+        x_min, x_max = min(x1, x2), max(x1, x2)
+        y_min, y_max = min(y1, y2), max(y1, y2)
+        
+        # Reset state
+        self.rect_start = None
+        self.rect_current = None
+        self.is_drawing = False
+        
+        # Get category
+        cat_name = self.category_var.get()
+        if not cat_name:
+            return
+        
+        # Detect connected components in rectangle
+        print(f"DEBUG: Rectangle selection: ({x_min}, {y_min}) to ({x_max}, {y_max}), category: {cat_name}")
+        detected_objects = self._detect_objects_in_rectangle(page, x_min, y_min, x_max, y_max)
+        print(f"DEBUG: Detected {len(detected_objects)} objects in rectangle")
+        
+        if not detected_objects:
+            self.status_var.set("No objects detected in rectangle")
+            return
+        
+        if len(detected_objects) == 1:
+            # Single object - create it directly
+            mask = detected_objects[0]
+            self._create_object_from_mask(page, cat_name, mask)
+        else:
+            # Multiple objects - show selection dialog
+            self._show_rectangle_selection_dialog(page, cat_name, detected_objects, x_min, y_min, x_max, y_max)
+    
+    def _is_line_like_shape(self, mask: np.ndarray) -> bool:
+        """
+        Check if a mask represents a line-like shape (elongated, not circular).
+        This is a simpler check than full leader line detection.
+        """
+        mask_pixels = np.where(mask > 0)
+        if len(mask_pixels[0]) == 0:
+            return False
+        
+        # Calculate aspect ratio of bounding box
+        ys, xs = mask_pixels
+        if len(xs) == 0:
+            return False
+        
+        x_min, x_max = int(np.min(xs)), int(np.max(xs))
+        y_min, y_max = int(np.min(ys)), int(np.max(ys))
+        width = x_max - x_min + 1
+        height = y_max - y_min + 1
+        
+        # Line should be elongated (aspect ratio > 1.5:1)
+        aspect_ratio = max(width, height) / max(min(width, height), 1)
+        return aspect_ratio >= 1.5
+    
+    def _is_leader_line(self, page: PageTab, mask: np.ndarray) -> bool:
+        """
+        Check if a mask represents a leader line (line with arrow pointing to text).
+        
+        Criteria:
+        1. Has endpoints (line-like structure)
+        2. Proximity to text regions
+        3. Arrow detection at one endpoint
+        4. Line-like shape (elongated, not circular)
+        """
+        h, w = page.original_image.shape[:2]
+        mask_pixels = np.where(mask > 0)
+        
+        if len(mask_pixels[0]) == 0:
+            return False
+        
+        # Find endpoints by counting neighbors
+        endpoints = []
+        for y, x in zip(mask_pixels[0], mask_pixels[1]):
+            neighbors = 0
+            for dy in [-1, 0, 1]:
+                for dx in [-1, 0, 1]:
+                    if dy == 0 and dx == 0:
+                        continue
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] > 0:
+                        neighbors += 1
+            if neighbors <= 1:  # Endpoint
+                endpoints.append((x, y))
+        
+        # Leader lines should have 1-2 endpoints
+        if len(endpoints) < 1 or len(endpoints) > 2:
+            return False
+        
+        # Check if it's line-like (elongated, not circular)
+        # Calculate aspect ratio of bounding box
+        ys, xs = mask_pixels
+        if len(xs) == 0:
+            return False
+        
+        x_min, x_max = int(np.min(xs)), int(np.max(xs))
+        y_min, y_max = int(np.min(ys)), int(np.max(ys))
+        width = x_max - x_min + 1
+        height = y_max - y_min + 1
+        
+        # Line should be elongated (aspect ratio > 2:1 or < 1:2)
+        aspect_ratio = max(width, height) / max(min(width, height), 1)
+        if aspect_ratio < 2.0:
+            return False  # Too circular/square, not a line
+        
+        # Check proximity to text regions
+        all_text_regions = []
+        if hasattr(page, 'auto_text_regions'):
+            all_text_regions.extend(page.auto_text_regions)
+        if hasattr(page, 'manual_text_regions'):
+            all_text_regions.extend(page.manual_text_regions)
+        
+        # If no text regions, still allow if it's line-like and has arrow
+        # (some leader lines might not have detected text nearby)
+        has_text_regions = bool(all_text_regions)
+        
+        # Check if any endpoint is near text (if text regions exist)
+        near_text = False
+        if has_text_regions:
+            for endpoint in endpoints:
+                ex, ey = endpoint
+                for region in all_text_regions:
+                    region_mask = region.get('mask')
+                    if region_mask is None:
+                        continue
+                    
+                    text_pixels = np.where(region_mask > 0)
+                    if len(text_pixels[0]) > 0:
+                        text_y = np.mean(text_pixels[0])
+                        text_x = np.mean(text_pixels[1])
+                        dist = np.sqrt((ex - text_x)**2 + (ey - text_y)**2)
+                        
+                        if dist < 100:  # Within 100 pixels
+                            near_text = True
+                            break
+                if near_text:
+                    break
+        
+        # Check for arrow at endpoint (small filled region at one end)
+        # Look for endpoint with more pixels nearby (arrowhead)
+        has_arrow = False
+        for endpoint in endpoints:
+            ax, ay = endpoint
+            arrow_region_size = 15
+            x1 = max(0, ax - arrow_region_size)
+            x2 = min(w, ax + arrow_region_size)
+            y1 = max(0, ay - arrow_region_size)
+            y2 = min(h, ay + arrow_region_size)
+            
+            region_mask = mask[y1:y2, x1:x2]
+            pixel_count = np.sum(region_mask > 0)
+            
+            # Arrow should have more pixels than just the line (filled triangle)
+            if pixel_count > 30:  # Threshold for arrowhead
+                has_arrow = True
+                break
+        
+        # Leader line should have arrow OR be near text (if text regions exist)
+        # OR if no text regions, just check for arrow (might be standalone leader)
+        if has_arrow:
+            return True  # Has arrow, definitely a leader
+        
+        if has_text_regions and near_text:
+            return True  # Near text, likely a leader
+        
+        # If no text regions but it's line-like, allow it (user might be selecting manually)
+        if not has_text_regions:
+            return True  # No text to check against, but it's line-like with endpoints
+        
+        # If has text regions but not near text and no arrow, not a leader
+        return False
+    
+    def _detect_objects_in_rectangle(self, page: PageTab, x_min: int, y_min: int, x_max: int, y_max: int) -> List[np.ndarray]:
+        """
+        Detect connected components (objects) within a rectangle area.
+        
+        Uses the working image (with text/hatch hidden if needed) to detect objects.
+        If category is mark_line, filters to only include leader lines.
+        
+        Returns:
+            List of binary masks, one for each detected connected component
+        """
+        h, w = page.original_image.shape[:2]
+        
+        # Clamp rectangle to image bounds
+        x_min = max(0, min(x_min, w - 1))
+        x_max = max(0, min(x_max, w - 1))
+        y_min = max(0, min(y_min, h - 1))
+        y_max = max(0, min(y_max, h - 1))
+        
+        if x_max <= x_min or y_max <= y_min:
+            return []
+        
+        # Use working image (respects category visibility - hides mark_text/hatch/line if categories are unchecked)
+        # This ensures rectangle selection only finds objects that are currently visible
+        working_image = self._get_working_image(page)
+        
+        # Extract rectangle region
+        roi = working_image[y_min:y_max, x_min:x_max]
+        print(f"DEBUG _detect_objects_in_rectangle: ROI extracted, shape: {roi.shape}")
+        
+        # Get category name early (needed for morphological operations)
+        cat_name = self.category_var.get()
+        
+        # Convert to grayscale if needed
+        if len(roi.shape) == 3:
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = roi
+        
+        # Threshold to get binary image (white paper = 255, lines/text = darker)
+        # Try multiple thresholding methods for better detection
+        roi_h, roi_w = gray.shape[:2]
+        
+        # Use adaptive threshold for larger regions, Otsu for smaller ones
+        if roi_w > 50 and roi_h > 50:
+            # Adaptive threshold for varying lighting
+            thresh = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
+            )
+        else:
+            # For small regions, use Otsu's method
+            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # Also try simple threshold as fallback if adaptive doesn't find much
+        # (Some images might have uniform background)
+        simple_thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)[1]
+        
+        # Combine both threshold results (union)
+        combined_thresh = cv2.bitwise_or(thresh, simple_thresh)
+        
+        # For mark_line category, DON'T use aggressive morphological operations
+        # This ensures we don't lose small features like arrowheads
+        # The user is manually selecting a rectangle, so trust their selection
+        if cat_name == "mark_line":
+            print(f"DEBUG: mark_line mode - using original threshold without aggressive morphology ({np.sum(combined_thresh > 0)} pixels)")
+        
+        # Find connected components
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(combined_thresh, connectivity=8)
+        print(f"DEBUG: Found {num_labels - 1} connected components (excluding background)")
+        
+        detected_masks = []
+        # cat_name already defined above
+        filter_leaders_only = (cat_name == "mark_line")
+        
+        for i in range(1, num_labels):  # Skip label 0 (background)
+            # Get component mask
+            component_mask = (labels == i).astype(np.uint8) * 255
+            
+            # Filter out very small components (noise)
+            pixel_count = np.sum(component_mask > 0)
+            if pixel_count < 50:  # Minimum 50 pixels
+                print(f"DEBUG: Component {i} filtered out (too small: {pixel_count} pixels)")
+                continue
+            
+            # Create full-size mask and place component at correct position
+            full_mask = np.zeros((h, w), dtype=np.uint8)
+            full_mask[y_min:y_max, x_min:x_max] = component_mask
+            
+            # If filtering for leader lines only, apply lenient checks
+            if filter_leaders_only:
+                # Calculate dimensions for debug
+                ys, xs = np.where(full_mask > 0)
+                if len(xs) > 0:
+                    x_min_bb, x_max_bb = int(np.min(xs)), int(np.max(xs))
+                    y_min_bb, y_max_bb = int(np.min(ys)), int(np.max(ys))
+                    width_bb = x_max_bb - x_min_bb + 1
+                    height_bb = y_max_bb - y_min_bb + 1
+                    aspect_ratio = max(width_bb, height_bb) / max(min(width_bb, height_bb), 1)
+                    
+                    # Very lenient check - if aspect ratio > 1.2, it's elongated enough
+                    # Or if it's small enough (potential arrow), include it
+                    is_elongated = aspect_ratio > 1.2
+                    is_small = pixel_count < 500  # Small objects might be arrows
+                    
+                    print(f"DEBUG: Component {i} ({pixel_count} pixels, {width_bb}x{height_bb}, aspect={aspect_ratio:.2f}): elongated={is_elongated}, small={is_small}")
+                    
+                    if is_elongated or is_small:
+                        detected_masks.append(full_mask)
+                    else:
+                        print(f"DEBUG: Component {i} filtered out (not elongated and not small)")
+                else:
+                    print(f"DEBUG: Component {i} has no pixels (empty mask)")
+            else:
+                # Include all components
+                print(f"DEBUG: Component {i} ({pixel_count} pixels): included")
+                detected_masks.append(full_mask)
+        
+        print(f"DEBUG: Returning {len(detected_masks)} detected masks")
+        return detected_masks
+    
+    def _detect_object_in_polyline(self, page: PageTab, polyline_mask: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Detect the actual object shape within a polyline selection area.
+        Uses the working image to find connected components within the polyline mask.
+        Returns the largest line-like component, or None if nothing found.
+        """
+        h, w = page.original_image.shape[:2]
+        
+        # Ensure mask is correct size
+        if polyline_mask.shape != (h, w):
+            return None
+        
+        # Get working image (respects category visibility)
+        working_image = self._get_working_image(page)
+        
+        # Convert to grayscale
+        if len(working_image.shape) == 3:
+            gray = cv2.cvtColor(working_image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = working_image
+        
+        # Threshold to get binary image
+        _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+        
+        # Apply polyline mask to restrict detection to selected area
+        masked_thresh = cv2.bitwise_and(thresh, polyline_mask)
+        
+        # Find connected components within the masked area
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(masked_thresh, connectivity=8)
+        
+        if num_labels <= 1:  # Only background
+            return None
+        
+        # Find the largest component that is line-like
+        best_label = None
+        best_pixel_count = 0
+        
+        for i in range(1, num_labels):  # Skip label 0 (background)
+            component_mask = (labels == i).astype(np.uint8) * 255
+            pixel_count = np.sum(component_mask > 0)
+            
+            # Filter out very small components
+            if pixel_count < 50:
+                continue
+            
+            # Check if it's line-like (elongated shape)
+            ys, xs = np.where(component_mask > 0)
+            if len(xs) > 0:
+                x_min_bb, x_max_bb = int(np.min(xs)), int(np.max(xs))
+                y_min_bb, y_max_bb = int(np.min(ys)), int(np.max(ys))
+                width_bb = x_max_bb - x_min_bb + 1
+                height_bb = y_max_bb - y_min_bb + 1
+                aspect_ratio = max(width_bb, height_bb) / max(min(width_bb, height_bb), 1)
+                
+                # Prefer elongated shapes (lines) or small shapes (arrows)
+                is_line_like = aspect_ratio > 1.2 or pixel_count < 500
+                
+                if is_line_like and pixel_count > best_pixel_count:
+                    best_pixel_count = pixel_count
+                    best_label = i
+        
+        if best_label is not None:
+            # Create full-size mask from the best label
+            full_mask = (labels == best_label).astype(np.uint8) * 255
+            return full_mask
+        
+        return None
+    
+    def _create_object_from_mask(self, page: PageTab, cat_name: str, mask: np.ndarray):
+        """Create a mark_* object from a binary mask."""
+        cat = self.categories.get(cat_name)
+        if not cat:
+            return
+        
+        # For mark_line, use _add_manual_line_region to get proper naming (ml-1, ll-1, etc.)
+        if cat_name == "mark_line":
+            self._add_manual_line_region(page, mask, [], "rect")
+        else:
+            # Generate element ID
+            element_id = f"{cat_name}_{uuid.uuid4().hex[:8]}"
+            
+            # Create element
+            elem = SegmentElement(
+                element_id=element_id,
+                category=cat_name,
+                mode="rect",  # Mark as created via rectangle selection
+                points=[],  # No points for rectangle-selected objects
+                mask=mask,
+                color=cat.color_rgb,
+                label_position=self.label_position
+            )
+            
+            # Add to category using existing _add_element method
+            self._add_element(elem)
+            
+            self.status_var.set(f"Created {cat_name} object from rectangle selection")
+    
+    def _show_rectangle_selection_dialog(self, page: PageTab, cat_name: str, 
+                                        detected_masks: List[np.ndarray],
+                                        x_min: int, y_min: int, x_max: int, y_max: int):
+        """Show dialog for selecting which detected objects to create."""
+        from tools.segmenter.dialogs import RectangleSelectionDialog
+        
+        # Check which masks are leader lines (for highlighting in dialog)
+        leader_flags = []
+        for mask in detected_masks:
+            is_leader = self._is_leader_line(page, mask)
+            leader_flags.append(is_leader)
+        
+        # Get working image (respects category visibility) for dialog preview
+        working_image = self._get_working_image(page)
+        
+        dialog = RectangleSelectionDialog(
+            self.root, page, detected_masks, cat_name, self.theme,
+            x_min, y_min, x_max, y_max, leader_flags=leader_flags,
+            working_image=working_image
+        )
+        
+        if dialog.result:
+            # Create objects for selected masks
+            for idx in dialog.result:
+                if 0 <= idx < len(detected_masks):
+                    self._create_object_from_mask(page, cat_name, detected_masks[idx])
+            
+            self.status_var.set(f"Created {len(dialog.result)} {cat_name} object(s)")
+            self._update_display()
+    
     # Tree management
     def _update_tree(self):
         """Full tree rebuild - shows ALL objects across all pages."""
         self.object_tree.delete(*self.object_tree.get_children())
         
-        grouping = self.tree_grouping_var.get() if hasattr(self, 'tree_grouping_var') else "none"
+        # Update mark_text, mark_hatch, and mark_line counts
+        if hasattr(self, 'mark_text_count_label'):
+            mark_text_count = sum(1 for o in self.all_objects if o.category == "mark_text")
+            self.mark_text_count_label.config(text=f"Mark Text: {mark_text_count}")
         
-        if grouping == "none":
+        if hasattr(self, 'mark_hatch_count_label'):
+            mark_hatch_count = sum(1 for o in self.all_objects if o.category == "mark_hatch")
+            self.mark_hatch_count_label.config(text=f"Mark Hatch: {mark_hatch_count}")
+        
+        if hasattr(self, 'mark_line_count_label'):
+            mark_line_count = sum(1 for o in self.all_objects if o.category == "mark_line")
+            self.mark_line_count_label.config(text=f"Mark Line: {mark_line_count}")
+        
+        grouping = self.tree_grouping_var.get() if hasattr(self, 'tree_grouping_var') else "category"
+        
+        if grouping == "category":
             # Flat list - all objects
             for obj in self.all_objects:
                 self._add_tree_item(obj)
@@ -2549,8 +3773,9 @@ class SegmenterApp:
             target_page_id = self._get_page_for_selection()
             if target_page_id and target_page_id != self.current_page_id:
                 self._switch_to_page(target_page_id)
-            
-            self._update_display()
+        
+        # Always update display when selection changes (for highlighting)
+        self._update_display()
         
         # Update current view selector based on selection
         self._update_view_from_selection()
@@ -3234,24 +4459,100 @@ class SegmenterApp:
     def _delete_selected(self):
         modified_objs = set()
         deleted_objs = set()
+        page_ids_to_update = set()  # Track page IDs that need mask updates (use IDs since PageTab is not hashable)
         
+        # Handle element deletions - also remove from page region lists if mark_text/hatch/line
         for elem_id in self.selected_element_ids:
             for obj in self.all_objects:
                 for inst in obj.instances:
+                    for elem in inst.elements:
+                        if elem.element_id == elem_id:
+                            # If this is a mark_text/hatch/line element, remove from page regions
+                            if obj.category in ["mark_text", "mark_hatch", "mark_line"]:
+                                page = self.pages.get(inst.page_id)
+                                if page:
+                                    page_ids_to_update.add(inst.page_id)
+                                    # Find and remove the corresponding region (from both auto and manual lists)
+                                    if obj.category == "mark_text":
+                                        if hasattr(page, 'manual_text_regions'):
+                                            page.manual_text_regions = [r for r in page.manual_text_regions 
+                                                                        if r.get('id') != elem_id]
+                                        if hasattr(page, 'auto_text_regions'):
+                                            page.auto_text_regions = [r for r in page.auto_text_regions 
+                                                                      if r.get('id') != elem_id]
+                                    elif obj.category == "mark_hatch":
+                                        if hasattr(page, 'manual_hatch_regions'):
+                                            page.manual_hatch_regions = [r for r in page.manual_hatch_regions 
+                                                                         if r.get('id') != elem_id]
+                                    elif obj.category == "mark_line":
+                                        if hasattr(page, 'manual_line_regions'):
+                                            page.manual_line_regions = [r for r in page.manual_line_regions 
+                                                                        if str(r.get('id', '')) != str(elem_id)]
+                    
                     old_len = len(inst.elements)
                     inst.elements = [e for e in inst.elements if e.element_id != elem_id]
                     if len(inst.elements) != old_len:
                         modified_objs.add(obj.object_id)
                 obj.instances = [i for i in obj.instances if i.elements]
         
+        # Handle instance deletions - also remove from page region lists if mark_text/hatch/line
         for inst_id in self.selected_instance_ids:
             for obj in self.all_objects:
+                for inst in obj.instances:
+                    if inst.instance_id == inst_id:
+                        # If this instance has mark_text/hatch/line elements, remove from page regions
+                        if obj.category in ["mark_text", "mark_hatch", "mark_line"]:
+                            page = self.pages.get(inst.page_id)
+                            if page:
+                                page_ids_to_update.add(inst.page_id)
+                                for elem in inst.elements:
+                                    if obj.category == "mark_text":
+                                        if hasattr(page, 'manual_text_regions'):
+                                            page.manual_text_regions = [r for r in page.manual_text_regions 
+                                                                        if r.get('id') != elem.element_id]
+                                        if hasattr(page, 'auto_text_regions'):
+                                            page.auto_text_regions = [r for r in page.auto_text_regions 
+                                                                      if r.get('id') != elem.element_id]
+                                    elif obj.category == "mark_hatch":
+                                        if hasattr(page, 'manual_hatch_regions'):
+                                            page.manual_hatch_regions = [r for r in page.manual_hatch_regions 
+                                                                         if r.get('id') != elem.element_id]
+                                    elif obj.category == "mark_line":
+                                        if hasattr(page, 'manual_line_regions'):
+                                            page.manual_line_regions = [r for r in page.manual_line_regions 
+                                                                        if str(r.get('id', '')) != str(elem.element_id)]
+                
                 old_len = len(obj.instances)
                 obj.instances = [i for i in obj.instances if i.instance_id != inst_id]
                 if len(obj.instances) != old_len:
                     modified_objs.add(obj.object_id)
         
+        # Handle object deletions - also remove from page region lists if mark_text/hatch/line
         for obj_id in self.selected_object_ids:
+            obj = self._get_object_by_id(obj_id)
+            if obj:
+                # If this object has mark_text/hatch/line elements, remove from page regions
+                if obj.category in ["mark_text", "mark_hatch", "mark_line"]:
+                    for inst in obj.instances:
+                        page = self.pages.get(inst.page_id)
+                        if page:
+                            page_ids_to_update.add(inst.page_id)
+                            for elem in inst.elements:
+                                if obj.category == "mark_text":
+                                    if hasattr(page, 'manual_text_regions'):
+                                        page.manual_text_regions = [r for r in page.manual_text_regions 
+                                                                    if r.get('id') != elem.element_id]
+                                    if hasattr(page, 'auto_text_regions'):
+                                        page.auto_text_regions = [r for r in page.auto_text_regions 
+                                                                  if r.get('id') != elem.element_id]
+                                elif obj.category == "mark_hatch":
+                                    if hasattr(page, 'manual_hatch_regions'):
+                                        page.manual_hatch_regions = [r for r in page.manual_hatch_regions 
+                                                                     if r.get('id') != elem.element_id]
+                                elif obj.category == "mark_line":
+                                    if hasattr(page, 'manual_line_regions'):
+                                        page.manual_line_regions = [r for r in page.manual_line_regions 
+                                                                    if str(r.get('id', '')) != str(elem.element_id)]
             deleted_objs.add(obj_id)
         
         # Remove deleted objects
@@ -3263,19 +4564,81 @@ class SegmenterApp:
                 deleted_objs.add(obj.object_id)
                 self.all_objects.remove(obj)
         
+        # Update combined masks for affected pages (optimize for mark_line deletion)
+        print(f"DEBUG _delete_selected: Updating masks for {len(page_ids_to_update)} pages")
+        import time
+        start_time = time.time()
+        
+        for page_id in page_ids_to_update:
+            page = self.pages.get(page_id)
+            if page:
+                # Only update masks if we actually deleted mark_text/hatch/line objects
+                deleted_mark_text = any(
+                    obj.category == "mark_text" for obj_id in deleted_objs 
+                    for obj in [self._get_object_by_id(obj_id)] if obj
+                )
+                deleted_mark_hatch = any(
+                    obj.category == "mark_hatch" for obj_id in deleted_objs 
+                    for obj in [self._get_object_by_id(obj_id)] if obj
+                )
+                deleted_mark_line = any(
+                    obj.category == "mark_line" for obj_id in deleted_objs 
+                    for obj in [self._get_object_by_id(obj_id)] if obj
+                )
+                
+                if deleted_mark_text and hasattr(page, 'manual_text_regions'):
+                    print(f"DEBUG: Updating text mask for page {page_id}")
+                    self._update_combined_text_mask(page, force_recompute=True)
+                if deleted_mark_hatch and hasattr(page, 'manual_hatch_regions'):
+                    print(f"DEBUG: Updating hatch mask for page {page_id}")
+                    self._update_combined_hatch_mask(page, force_recompute=True)
+                if deleted_mark_line:
+                    print(f"DEBUG: Updating line mask for page {page_id}")
+                    # Recompute combined line mask from all remaining objects
+                    self._update_combined_line_mask(page, force_recompute=True)
+        
+        elapsed = time.time() - start_time
+        print(f"DEBUG _delete_selected: Mask update took {elapsed:.3f} seconds")
+        
+        # Save tree state before rebuild (which categories are expanded)
+        expanded_categories = set()
+        if hasattr(self, 'tree_grouping_var') and self.tree_grouping_var.get() == "category":
+            for item in self.object_tree.get_children():
+                if item.startswith("cat_"):
+                    if self.object_tree.item(item, "open"):
+                        expanded_categories.add(item)
+        
+        # Determine if we deleted mark_line objects and should select the category heading
+        deleted_mark_line = any(
+            obj.category == "mark_line" for obj_id in deleted_objs 
+            for obj in [self._get_object_by_id(obj_id)] if obj
+        )
+        
         self.selected_object_ids.clear()
         self.selected_instance_ids.clear()
         self.selected_element_ids.clear()
         self.workspace_modified = True
         self.renderer.invalidate_cache()  # Objects changed
         
-        # Incremental tree update
-        for obj_id in deleted_objs:
-            self._remove_tree_item(obj_id)
-        for obj_id in modified_objs - deleted_objs:
-            obj = self._get_object_by_id(obj_id)
-            if obj:
-                self._update_tree_item(obj)
+        # Full tree rebuild since objects have been removed
+        # (Incremental update doesn't work well after objects are removed from all_objects)
+        self._update_tree()
+        
+        # Restore tree state (which categories are expanded)
+        if hasattr(self, 'tree_grouping_var') and self.tree_grouping_var.get() == "category":
+            for item in self.object_tree.get_children():
+                if item.startswith("cat_"):
+                    if item in expanded_categories:
+                        self.object_tree.item(item, open=True)
+                    else:
+                        self.object_tree.item(item, open=False)
+        
+        # If mark_line objects were deleted, select the mark_line category heading
+        if deleted_mark_line:
+            mark_line_cat_id = "cat_mark_line"
+            if self.object_tree.exists(mark_line_cat_id):
+                self.object_tree.selection_set(mark_line_cat_id)
+                self.object_tree.see(mark_line_cat_id)
         
         self._update_display()
     
@@ -3513,7 +4876,12 @@ class SegmenterApp:
                 name="mark_hatch", prefix="mark_hatch", full_name="Mark as Hatching",
                 color_rgb=(200, 0, 255), selection_mode="flood"
             )
-        
+        if "mark_line" not in self.categories:
+            self.categories["mark_line"] = DynamicCategory(
+                name="mark_line", prefix="mark_line", full_name="Mark as Leader Line",
+                color_rgb=(0, 255, 255), selection_mode="flood"
+            )
+
         self._refresh_categories()
         
         # Load global objects
@@ -3523,22 +4891,31 @@ class SegmenterApp:
         for page in data.pages:
             self._add_page(page, from_workspace=True)
         
-        # Second pass: rebuild all masks AFTER pages are added
+        # Second pass: rebuild all masks AFTER pages are added (optimized batch processing)
         # This ensures masks exist before any display update happens
-        for page in data.pages:
-            # ALWAYS rebuild combined masks to ensure they're initialized
-            self._update_combined_text_mask(page)
-            self._update_combined_hatch_mask(page)
+        self.status_var.set("Building masks...")
+        self.root.update()
+        
+        for i, page in enumerate(data.pages):
+            # Update progress for large workspaces
+            if len(data.pages) > 1:
+                self.status_var.set(f"Building masks... {i+1}/{len(data.pages)}")
+                self.root.update()
             
-            # Debug: print mask status
-            text_mask = getattr(page, 'combined_text_mask', None)
-            hatch_mask = getattr(page, 'combined_hatch_mask', None)
-            print(f"Page {page.display_name}: hide_text={getattr(page, 'hide_text', False)}, "
-                  f"text_mask={(text_mask.shape if text_mask is not None else None)}, "
-                  f"mask_sum={np.sum(text_mask) if text_mask is not None else 0}")
-            print(f"  hide_hatch={getattr(page, 'hide_hatching', False)}, "
-                  f"hatch_mask={(hatch_mask.shape if hatch_mask is not None else None)}, "
-                  f"mask_sum={np.sum(hatch_mask) if hatch_mask is not None else 0}")
+            # ALWAYS rebuild combined masks to ensure they're initialized
+            self._update_combined_text_mask(page, force_recompute=True)
+            self._update_combined_hatch_mask(page, force_recompute=True)
+            
+            # Add existing text regions to mark_text category
+            self._add_existing_text_regions_to_category(page)
+            # Add existing line regions to mark_line category (repairs masks)
+            print(f"DEBUG _load_workspace: Calling _add_existing_line_regions_to_category for page {page.tab_id}")
+            self._add_existing_line_regions_to_category(page)
+            
+            # Rebuild combined_line_mask from all mark_line objects (including those loaded from workspace)
+            self._update_combined_line_mask(page, force_recompute=True)
+        
+        self.status_var.set("Loading complete")
         
         # CRITICAL: Invalidate renderer cache AFTER masks are built
         # This forces re-render with correct masks when display updates
@@ -3546,7 +4923,7 @@ class SegmenterApp:
         
         self._update_tree()  # Rebuild tree with loaded objects
         
-        # Update view menu to reflect loaded page's hide states
+        # Update view menu (no longer needs hide_text state)
         self._update_view_menu_labels()
         
         self.workspace_file = path
@@ -3603,6 +4980,236 @@ class SegmenterApp:
             DataExporter().export_page(path, page)
             self.status_var.set(f"Exported: {Path(path).name}")
     
+    def _create_view_tab_from_planform(self):
+        """Create a new working tab from the selected planform object with only objects inside its boundary."""
+        page = self._get_current_page()
+        if not page:
+            messagebox.showwarning("No Page", "No page is currently open.")
+            return
+        
+        # Check if a planform object is selected
+        if not self.selected_object_ids:
+            messagebox.showwarning("No Selection", "Please select a planform object first.")
+            return
+        
+        # Get the selected planform object
+        selected_obj_id = next(iter(self.selected_object_ids))
+        planform_obj = None
+        for obj in self.all_objects:
+            if obj.object_id == selected_obj_id and obj.category == "planform":
+                planform_obj = obj
+                break
+        
+        if not planform_obj:
+            messagebox.showwarning("Invalid Selection", "Please select a planform object.")
+            return
+        
+        # Get the planform's mask (combined mask from all its elements on this page)
+        h, w = page.original_image.shape[:2]
+        planform_mask = np.zeros((h, w), dtype=np.uint8)
+        
+        for inst in planform_obj.instances:
+            if inst.page_id == page.tab_id:
+                for elem in inst.elements:
+                    if elem.mask is not None and elem.mask.shape == (h, w):
+                        planform_mask = np.maximum(planform_mask, elem.mask)
+        
+        if np.sum(planform_mask > 0) == 0:
+            messagebox.showwarning("Invalid Planform", "The selected planform has no valid mask.")
+            return
+        
+        # Get the working image (with hidden pixels removed) and crop to planform bounds
+        working_image = self._get_working_image(page)
+        
+        # Find bounding box of planform to crop image
+        ys, xs = np.where(planform_mask > 0)
+        if len(xs) == 0:
+            messagebox.showwarning("Invalid Planform", "The selected planform has no pixels.")
+            return
+        
+        x_min, x_max = int(np.min(xs)), int(np.max(xs)) + 1
+        y_min, y_max = int(np.min(ys)), int(np.max(ys)) + 1
+        
+        # Add some padding
+        padding = 20
+        x_min = max(0, x_min - padding)
+        y_min = max(0, y_min - padding)
+        x_max = min(w, x_max + padding)
+        y_max = min(h, y_max + padding)
+        
+        # Crop the working image to the planform area
+        cropped_image = working_image[y_min:y_max, x_min:x_max].copy()
+        cropped_h, cropped_w = cropped_image.shape[:2]
+        
+        # Adjust planform mask coordinates for cropped image
+        cropped_planform_mask = planform_mask[y_min:y_max, x_min:x_max].copy()
+        
+        # Ask for a name for the new view tab
+        view_name = simpledialog.askstring(
+            "Create View Tab",
+            "Enter a name for the new view tab:",
+            initialvalue=f"{planform_obj.name}_view"
+        )
+        if not view_name:
+            return
+        
+        # Create new PageTab with the cropped cleaned image
+        new_page = PageTab(
+            tab_id=str(uuid.uuid4())[:8],
+            model_name=page.model_name,
+            page_name=view_name,
+            original_image=cropped_image,  # Use cropped cleaned image as original
+            source_path=page.source_path,
+            rotation=page.rotation,
+            active=True,
+            dpi=page.dpi,
+            pdf_width_inches=page.pdf_width_inches,
+            pdf_height_inches=page.pdf_height_inches
+        )
+        
+        # Copy only the selected planform and objects inside its boundary
+        mark_categories = {"mark_text", "mark_hatch", "mark_line"}
+        copied_count = 0
+        
+        # First, copy the planform object itself
+        new_planform_instances = []
+        for inst in planform_obj.instances:
+            if inst.page_id == page.tab_id:
+                # Adjust element masks and points for cropped coordinates
+                new_elements = []
+                for elem in inst.elements:
+                    if elem.mask is not None and elem.mask.shape == (h, w):
+                        # Crop the mask
+                        cropped_elem_mask = elem.mask[y_min:y_max, x_min:x_max].copy()
+                        # Adjust points
+                        adjusted_points = [(x - x_min, y - y_min) for x, y in elem.points]
+                        
+                        new_elem = SegmentElement(
+                            element_id=elem.element_id,
+                            category=elem.category,
+                            mode=elem.mode,
+                            points=adjusted_points,
+                            mask=cropped_elem_mask,
+                            color=elem.color,
+                            label_position=elem.label_position
+                        )
+                        new_elements.append(new_elem)
+                
+                if new_elements:
+                    new_inst = ObjectInstance(
+                        instance_id=f"{inst.instance_id}_{new_page.tab_id}",
+                        instance_num=inst.instance_num,
+                        elements=new_elements,
+                        page_id=new_page.tab_id,
+                        view_type=inst.view_type,
+                        attributes=inst.attributes
+                    )
+                    new_planform_instances.append(new_inst)
+        
+        if new_planform_instances:
+            new_planform_obj = SegmentedObject(
+                object_id=f"{planform_obj.object_id}_{new_page.tab_id}",
+                name=planform_obj.name,
+                category=planform_obj.category,
+                instances=new_planform_instances
+            )
+            self.all_objects.append(new_planform_obj)
+            copied_count += 1
+        
+        # Now copy objects that are inside the planform boundary
+        for obj in self.all_objects:
+            # Skip the planform itself (already copied) and mark_* categories
+            if obj.object_id == planform_obj.object_id or obj.category in mark_categories:
+                continue
+            
+            # Only check objects with instances on the current page
+            has_instance_on_page = any(inst.page_id == page.tab_id for inst in obj.instances)
+            if not has_instance_on_page:
+                continue
+            
+            # Check if object is inside planform boundary
+            # An object is inside if any of its element masks overlap with the planform mask
+            is_inside = False
+            for inst in obj.instances:
+                if inst.page_id == page.tab_id:
+                    for elem in inst.elements:
+                        if elem.mask is not None and elem.mask.shape == (h, w):
+                            # Check if element overlaps with planform mask
+                            overlap = np.sum((elem.mask > 0) & (planform_mask > 0))
+                            element_pixels = np.sum(elem.mask > 0)
+                            # Consider inside if at least 50% of element is inside planform
+                            if element_pixels > 0 and overlap / element_pixels > 0.5:
+                                is_inside = True
+                                break
+                    if is_inside:
+                        break
+            
+            if is_inside:
+                # Create a copy of the object with adjusted coordinates
+                new_instances = []
+                for inst in obj.instances:
+                    if inst.page_id == page.tab_id:
+                        # Adjust element masks and points for cropped coordinates
+                        new_elements = []
+                        for elem in inst.elements:
+                            if elem.mask is not None and elem.mask.shape == (h, w):
+                                # Crop the mask
+                                cropped_elem_mask = elem.mask[y_min:y_max, x_min:x_max].copy()
+                                # Adjust points
+                                adjusted_points = [(x - x_min, y - y_min) for x, y in elem.points]
+                                
+                                new_elem = SegmentElement(
+                                    element_id=elem.element_id,
+                                    category=elem.category,
+                                    mode=elem.mode,
+                                    points=adjusted_points,
+                                    mask=cropped_elem_mask,
+                                    color=elem.color,
+                                    label_position=elem.label_position
+                                )
+                                new_elements.append(new_elem)
+                        
+                        if new_elements:
+                            new_inst = ObjectInstance(
+                                instance_id=f"{inst.instance_id}_{new_page.tab_id}",
+                                instance_num=inst.instance_num,
+                                elements=new_elements,
+                                page_id=new_page.tab_id,
+                                view_type=inst.view_type,
+                                attributes=inst.attributes
+                            )
+                            new_instances.append(new_inst)
+                
+                if new_instances:
+                    # Create new object with copied instances
+                    new_obj = SegmentedObject(
+                        object_id=f"{obj.object_id}_{new_page.tab_id}",
+                        name=obj.name,
+                        category=obj.category,
+                        instances=new_instances
+                    )
+                    self.all_objects.append(new_obj)
+                    copied_count += 1
+        
+        # Initialize empty masks for the new page (no mark_* objects)
+        new_page.combined_text_mask = None
+        new_page.combined_hatch_mask = None
+        new_page.combined_line_mask = None
+        
+        # Add the new page to the notebook
+        self._add_page(new_page, from_workspace=False)
+        
+        # Switch to the new page
+        self.current_page_id = new_page.tab_id
+        self.notebook.select(self.pages[new_page.tab_id].frame)
+        
+        # Update display
+        self._update_display()
+        self._update_tree()
+        
+        self.status_var.set(f"Created view tab '{view_name}' with {copied_count} visible objects")
+        self.workspace_modified = True
+    
     def _scan_labels(self):
         pages = [p for p in self.pages.values() if p.original_image is not None]
         if not pages:
@@ -3626,31 +5233,12 @@ class SegmenterApp:
     
     def _get_view_state(self) -> dict:
         """Get current view state for workspace saving."""
-        # Get actual panel widths from paned window
-        sidebar_width = self.settings.sidebar_width
-        tree_width = self.settings.tree_width
-        
-        if hasattr(self, 'layout') and hasattr(self.layout, 'paned'):
-            try:
-                panes = self.layout.paned.panes()
-                if len(panes) >= 1:
-                    w = self.layout.paned.panecget(panes[0], 'width')
-                    sidebar_width = int(w) if w else sidebar_width
-                if len(panes) >= 3:
-                    w = self.layout.paned.panecget(panes[2], 'width')
-                    tree_width = int(w) if w else tree_width
-                print(f"_get_view_state: sidebar={sidebar_width}, tree={tree_width}")
-            except Exception as e:
-                print(f"Error getting panel widths: {e}")
-        
         return {
             "current_page_id": self.current_page_id,
             "zoom_level": self.zoom_level,
-            "group_by": self.group_by_var.get() if hasattr(self, 'group_by_var') else "none",
+            "group_by": self.group_by_var.get() if hasattr(self, 'group_by_var') else "category",
             "show_labels": self.show_labels,
             "current_view": self.current_view_var.get() if hasattr(self, 'current_view_var') else "",
-            "sidebar_width": sidebar_width,
-            "tree_width": tree_width,
         }
     
     def _restore_view_state(self, view_state: dict):
@@ -3665,7 +5253,7 @@ class SegmenterApp:
         
         # Restore group by
         if hasattr(self, 'group_by_var'):
-            self.group_by_var.set(view_state.get("group_by", "none"))
+            self.group_by_var.set(view_state.get("group_by", "category"))
         
         # Restore show labels
         self.show_labels = view_state.get("show_labels", True)
@@ -3675,36 +5263,6 @@ class SegmenterApp:
         # Restore current view
         if hasattr(self, 'current_view_var'):
             self.current_view_var.set(view_state.get("current_view", ""))
-        
-        # Restore panel widths
-        sidebar_width = view_state.get("sidebar_width", self.settings.sidebar_width)
-        tree_width = view_state.get("tree_width", self.settings.tree_width)
-        self.settings.sidebar_width = sidebar_width
-        self.settings.tree_width = tree_width
-        
-        # Update paned window widths - use paneconfig with minsize to prevent collapse
-        if hasattr(self, 'layout') and hasattr(self.layout, 'paned'):
-            def _apply_panel_widths():
-                try:
-                    paned = self.layout.paned
-                    panes = paned.panes()
-                    
-                    print(f"_restore_view_state: {len(panes)} panes, sidebar={sidebar_width}, tree={tree_width}")
-                    
-                    if len(panes) >= 1:
-                        # Left panel (sidebar)
-                        paned.paneconfig(panes[0], width=sidebar_width, minsize=200)
-                    if len(panes) >= 3:
-                        # Right panel (tree)
-                        paned.paneconfig(panes[2], width=tree_width, minsize=200)
-                    
-                    # Force update
-                    paned.update_idletasks()
-                except Exception as e:
-                    print(f"Could not restore panel widths: {e}")
-            
-            # Schedule after UI is ready - longer delay to ensure geometry is set
-            self.root.after(200, _apply_panel_widths)
         
         # Restore current page (done after all pages loaded)
         target_page_id = view_state.get("current_page_id")

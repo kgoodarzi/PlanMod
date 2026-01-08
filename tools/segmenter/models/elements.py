@@ -102,14 +102,42 @@ class SegmentElement:
         return self.mask[y, x] > 0
     
     def to_dict(self) -> dict:
-        """Serialize to dictionary (mask not included)."""
-        return {
+        """Serialize to dictionary. Mask included for 'auto' mode using RLE encoding."""
+        result = {
             "element_id": self.element_id,
             "category": self.category,
             "mode": self.mode,
             "points": self.points,
             "label_position": self.label_position,
         }
+        
+        # For 'auto' and 'rect' modes, we must save the mask
+        # since there are no points to reconstruct it from
+        if self.mode in ["auto", "rect"] and self.mask is not None:
+            # Find bounding box to minimize storage
+            ys, xs = np.where(self.mask > 0)
+            if len(xs) > 0 and len(ys) > 0:
+                x1, x2 = int(np.min(xs)), int(np.max(xs)) + 1
+                y1, y2 = int(np.min(ys)), int(np.max(ys)) + 1
+                cropped = self.mask[y1:y2, x1:x2]
+                
+                # Encode as RLE (run-length encoding)
+                flat = cropped.flatten()
+                runs = []
+                i = 0
+                while i < len(flat):
+                    val = int(flat[i])
+                    count = 1
+                    while i + count < len(flat) and flat[i + count] == val:
+                        count += 1
+                    runs.append([val, count])
+                    i += count
+                
+                result["mask_bbox"] = [x1, y1, x2, y2]
+                result["mask_shape"] = [int(cropped.shape[0]), int(cropped.shape[1])]
+                result["mask_rle"] = runs
+        
+        return result
     
     @classmethod
     def from_dict(cls, data: dict, mask: Optional[np.ndarray] = None,

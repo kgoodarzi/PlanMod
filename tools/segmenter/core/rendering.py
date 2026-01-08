@@ -79,7 +79,8 @@ class Renderer:
                     hide_background: bool = False,
                     objects: list = None,
                     text_mask: np.ndarray = None,
-                    hatching_mask: np.ndarray = None) -> np.ndarray:
+                    hatching_mask: np.ndarray = None,
+                    line_mask: np.ndarray = None) -> np.ndarray:
         """
         Render a page with all overlays (with caching).
         
@@ -103,14 +104,17 @@ class Renderer:
         # Compute mask hashes to detect when mask content changes
         text_mask_hash = ""
         hatching_mask_hash = ""
+        line_mask_hash = ""
         if text_mask is not None and text_mask.shape == (h, w):
             text_mask_hash = str(np.sum(text_mask))  # Simple checksum
         if hatching_mask is not None and hatching_mask.shape == (h, w):
             hatching_mask_hash = str(np.sum(hatching_mask))
+        if line_mask is not None and line_mask.shape == (h, w):
+            line_mask_hash = str(np.sum(line_mask))
         
         # Check if we need to rebuild base image (include mask content in hash)
         current_hash = (self._compute_objects_hash_from_list(objects, categories, planform_opacity) + 
-                       str(hide_background) + text_mask_hash + hatching_mask_hash)
+                       str(hide_background) + text_mask_hash + hatching_mask_hash + line_mask_hash)
         need_base_rebuild = (
             self.cache.base_image is None or 
             self.cache.base_hash != current_hash or
@@ -122,7 +126,8 @@ class Renderer:
             print(f"RENDER: Rebuilding base image for page {page.tab_id}")
             print(f"  text_mask: {text_mask is not None}, hash={text_mask_hash}")
             print(f"  hatching_mask: {hatching_mask is not None}, hash={hatching_mask_hash}")
-            self.cache.base_image = self._render_base(page, categories, planform_opacity, hide_background, objects, text_mask, hatching_mask)
+            print(f"  line_mask: {line_mask is not None}, hash={line_mask_hash}")
+            self.cache.base_image = self._render_base(page, categories, planform_opacity, hide_background, objects, text_mask, hatching_mask, line_mask)
             self.cache.base_hash = current_hash
             self.cache.page_id = page.tab_id
             self.cache.invalidate_zoom()
@@ -156,7 +161,7 @@ class Renderer:
     def _render_base(self, page: PageTab, categories: Dict[str, DynamicCategory],
                      planform_opacity: float, hide_background: bool = False,
                      objects: list = None, text_mask: np.ndarray = None,
-                     hatching_mask: np.ndarray = None) -> np.ndarray:
+                     hatching_mask: np.ndarray = None, line_mask: np.ndarray = None) -> np.ndarray:
         """Render the base blended image (original + segmentation overlay)."""
         h, w = page.original_image.shape[:2]
         objects = objects if objects is not None else page.objects
@@ -182,6 +187,12 @@ class Renderer:
             base_image[hatching_mask > 0] = [255, 255, 255]  # White in BGR
             hide_mask = np.maximum(hide_mask, hatching_mask)
         
+        if line_mask is not None and line_mask.shape == (h, w):
+            pixels_hidden = np.sum(line_mask > 0)
+            print(f"  _render_base: Hiding {pixels_hidden} line pixels")
+            base_image[line_mask > 0] = [255, 255, 255]  # White in BGR
+            hide_mask = np.maximum(hide_mask, line_mask)
+        
         # Create segmentation overlay
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
         
@@ -192,6 +203,11 @@ class Renderer:
         for obj in objects:
             cat = categories.get(obj.category)
             if not cat or not cat.visible:
+                continue
+            
+            # Skip rendering fill for mark_* objects (they're only for hiding/erasing)
+            # They will still be highlighted if selected via _highlight_selected
+            if obj.category in ["mark_text", "mark_hatch", "mark_line"]:
                 continue
             
             opacity = planform_opacity if obj.category == "planform" else 0.7
@@ -208,9 +224,12 @@ class Renderer:
             # This fills gaps caused by text that was present during flood fill
             if has_text_mask and np.any(obj_mask > 0):
                 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                # Use in-place operations where possible to reduce memory
                 grown_mask = obj_mask.copy()
                 
-                for _ in range(100):
+                # Limit iterations to prevent excessive memory usage on large images
+                max_iterations = min(100, int(np.sqrt(h * w) / 10))  # Adaptive limit
+                for _ in range(max_iterations):
                     dilated = cv2.dilate(grown_mask, kernel, iterations=1)
                     # Only grow into TEXT mask pixels (not hatch)
                     new_pixels = (dilated > 0) & (grown_mask == 0) & (text_mask > 0)
@@ -229,18 +248,38 @@ class Renderer:
         
         if hide_background:
             # Show only objects on white background
-            background = np.ones((h, w, 4), dtype=np.uint8) * 255  # White BGRA
-            alpha = overlay[:, :, 3:4] / 255.0
-            blended = (background * (1 - alpha) + overlay * alpha).astype(np.uint8)
+            # Use uint8 operations to avoid float32 memory overhead
+            blended = np.zeros((h, w, 4), dtype=np.uint8)
+            blended[:, :, :3] = 255  # White background
+            alpha_channel = overlay[:, :, 3]  # Extract alpha as 2D array
+            # Blend: result = background * (1 - alpha/255) + overlay * (alpha/255)
+            # For white background: result = 255 * (1 - alpha/255) + overlay * (alpha/255)
+            # = 255 - alpha + overlay * alpha / 255
+            # Optimized: use uint16 for intermediate calculations
+            alpha_u16 = alpha_channel.astype(np.uint16)
+            for c in range(3):
+                overlay_c = overlay[:, :, c].astype(np.uint16)
+                # result = 255 - alpha + overlay * alpha / 255
+                result = 255 - alpha_u16 + (overlay_c * alpha_u16 // 255)
+                blended[:, :, c] = result.clip(0, 255).astype(np.uint8)
             blended[:, :, 3] = 255  # Full opacity
         else:
             # Blend overlay onto base image (which already has text/hatch hidden)
             base_rgba = cv2.cvtColor(base_image, cv2.COLOR_BGR2BGRA)
-            alpha = overlay[:, :, 3:4] / 255.0
-            # Use proper alpha blending - overlay on top of base
-            blended = (base_rgba * (1 - alpha) + overlay * alpha).astype(np.uint8)
-            # Where no overlay, show base; where overlay, blend properly
-            blended[:, :, 3] = 255  # Full opacity for final image
+            alpha_channel = overlay[:, :, 3]  # Extract alpha as 2D array
+            # Optimized uint8 blending: result = base * (1 - alpha/255) + overlay * (alpha/255)
+            # = base - base * alpha/255 + overlay * alpha/255
+            # = base + (overlay - base) * alpha / 255
+            alpha_u16 = alpha_channel.astype(np.uint16)
+            blended = base_rgba.copy()
+            for c in range(3):
+                base_c = base_rgba[:, :, c].astype(np.uint16)
+                overlay_c = overlay[:, :, c].astype(np.uint16)
+                # result = base + (overlay - base) * alpha / 255
+                diff = overlay_c - base_c
+                result = base_c + (diff * alpha_u16 // 255)
+                blended[:, :, c] = result.clip(0, 255).astype(np.uint8)
+            blended[:, :, 3] = 255  # Full opacity
         
         return blended
     
@@ -312,15 +351,20 @@ class Renderer:
                         should_highlight = obj.object_id in selected_object_ids
                     
                     if should_highlight and elem.mask is not None:
-                        contours, _ = cv2.findContours(
-                            elem.mask.astype(np.uint8),
-                            cv2.RETR_EXTERNAL,
-                            cv2.CHAIN_APPROX_SIMPLE
-                        )
-                        # Draw black outline first (for contrast)
-                        cv2.drawContours(image, contours, -1, (0, 0, 0, 255), 4)
-                        # Yellow highlight contour on top
-                        cv2.drawContours(image, contours, -1, (0, 255, 255, 255), 2)
+                        # Check if mask has any content
+                        if np.any(elem.mask > 0):
+                            contours, _ = cv2.findContours(
+                                elem.mask.astype(np.uint8),
+                                cv2.RETR_EXTERNAL,
+                                cv2.CHAIN_APPROX_SIMPLE
+                            )
+                            if contours:  # Only draw if contours found
+                                # Draw black outline first (for contrast)
+                                cv2.drawContours(image, contours, -1, (0, 0, 0, 255), 4)
+                                # Yellow highlight contour on top
+                                cv2.drawContours(image, contours, -1, (0, 255, 255, 255), 2)
+                        else:
+                            print(f"DEBUG: Element {elem.element_id} has empty mask, skipping highlight")
     
     def _draw_pending_elements(self, image: np.ndarray, elements: list):
         """Draw elements being created in group mode."""

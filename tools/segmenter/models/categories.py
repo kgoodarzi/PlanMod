@@ -73,9 +73,10 @@ DEFAULT_CATEGORIES: Dict[str, Tuple[str, Tuple[int, int, int], str]] = {
     "planform": ("Planform/View", (0, 200, 100), "polyline"),
     "textbox": ("Text/Description", (200, 200, 100), "polyline"),
     
-    # Manual mask markers (for hide text/hatching feature) - support all selection modes
+    # Manual mask markers (for hide text/hatching/leader lines feature) - support all selection modes
     "mark_text": ("Mark as Text", (255, 200, 0), "flood"),
     "mark_hatch": ("Mark as Hatching", (200, 0, 255), "flood"),
+    "mark_line": ("Mark as Leader Line", (0, 255, 255), "flood"),
     
     # Structural categories
     "longeron": ("Longeron", (0, 80, 200), "line"),

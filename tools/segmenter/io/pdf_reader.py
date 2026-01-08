@@ -13,14 +13,16 @@ class PDFReader:
     Uses PyMuPDF (fitz) for PDF rendering.
     """
     
-    def __init__(self, dpi: int = 150):
+    def __init__(self, dpi: int = 150, max_dimension: int = 4000):
         """
         Initialize PDF reader.
         
         Args:
             dpi: Resolution for rasterization (dots per inch)
+            max_dimension: Maximum width or height in pixels (to prevent memory issues)
         """
         self.dpi = dpi
+        self.max_dimension = max_dimension
     
     def load(self, path: str) -> List[np.ndarray]:
         """
@@ -50,6 +52,15 @@ class PDFReader:
                     img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
                 elif pix.n == 3:
                     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                
+                # Resize if image is too large to prevent memory issues
+                h, w = img.shape[:2]
+                if max(h, w) > self.max_dimension:
+                    scale = self.max_dimension / max(h, w)
+                    new_w = int(w * scale)
+                    new_h = int(h * scale)
+                    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                    print(f"Resized image from {w}x{h} to {new_w}x{new_h} to fit memory limits")
                 
                 pages.append(img)
             
@@ -99,6 +110,15 @@ class PDFReader:
                     img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
                 elif pix.n == 3:
                     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                
+                # Resize if image is too large to prevent memory issues
+                h, w = img.shape[:2]
+                if max(h, w) > self.max_dimension:
+                    scale = self.max_dimension / max(h, w)
+                    new_w = int(w * scale)
+                    new_h = int(h * scale)
+                    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                    print(f"Resized image from {w}x{h} to {new_w}x{new_h} to fit memory limits")
                 
                 pages.append({
                     'image': img,
@@ -171,6 +191,15 @@ class PDFReader:
                 img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
             elif pix.n == 3:
                 img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            
+            # Resize if image is too large to prevent memory issues
+            h, w = img.shape[:2]
+            if max(h, w) > self.max_dimension:
+                scale = self.max_dimension / max(h, w)
+                new_w = int(w * scale)
+                new_h = int(h * scale)
+                img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                print(f"Resized image from {w}x{h} to {new_w}x{new_h} to fit memory limits")
             
             doc.close()
             return img
