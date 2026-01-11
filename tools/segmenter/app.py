@@ -13,6 +13,33 @@ import uuid
 import cv2
 import numpy as np
 from PIL import Image, ImageTk, ImageDraw
+import sys
+import os
+
+# Add findline tools to path
+# __file__ is tools/segmenter/app.py, so we need to go up to PlanMod root
+# then into tools/findline
+_segmenter_dir = Path(__file__).parent  # tools/segmenter
+_project_root = _segmenter_dir.parent.parent  # PlanMod root
+findline_path = _project_root / "tools" / "findline"
+if findline_path.exists() and str(findline_path) not in sys.path:
+    sys.path.insert(0, str(findline_path))
+
+# Import findline functions
+try:
+    from trace_with_points import (
+        convert_to_monochrome,
+        skeletonize_image,
+        find_nearest_skeleton_point,
+        trace_between_points,
+        measure_line_thickness,
+        select_line_pixels,
+        detect_collisions
+    )
+    FINDLINE_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: findline tools not available: {e}")
+    FINDLINE_AVAILABLE = False
 
 from tools.segmenter.config import (
     load_settings, save_settings, get_theme, get_theme_names, 
@@ -71,11 +98,25 @@ class SegmenterApp:
         self.current_page_id: Optional[str] = None
         self.categories: Dict[str, DynamicCategory] = {}
         self.all_objects: List[SegmentedObject] = []  # Global object list across all pages
+        # Store which objects are within each planform (planform_id -> list of object_ids)
+        self.planform_objects: Dict[str, List[str]] = {}
         
         # Selection state
         self.selected_object_ids: Set[str] = set()
         self.selected_instance_ids: Set[str] = set()
         self.selected_element_ids: Set[str] = set()
+        
+        # Pixel/raster selection state
+        self.selected_pixel_mask: Optional[np.ndarray] = None  # Binary mask of selected pixels
+        self.selected_pixel_bbox: Optional[Tuple[int, int, int, int]] = None  # (x_min, y_min, x_max, y_max)
+        self.is_moving_pixels = False  # Whether we're in move mode for pixels
+        self.pixel_move_start: Optional[Tuple[int, int]] = None  # Starting position for move
+        self.pixel_move_offset: Optional[Tuple[int, int]] = None  # Current offset during move
+        
+        # Object/element move state
+        self.is_moving_objects = False  # Whether we're in move mode for objects/elements
+        self.object_move_start: Optional[Tuple[int, int]] = None  # Starting position for move
+        self.object_move_offset: Optional[Tuple[int, int]] = None  # Current offset during move
         
         # Tool state
         self.current_mode = "flood"
@@ -97,6 +138,11 @@ class SegmenterApp:
         # Workspace state
         self.workspace_file: Optional[str] = None
         self.workspace_modified = False
+        
+        # Cache for working image (to avoid recomputing on every call)
+        # Format: (page_id, visibility_state, image, applied_masks)
+        # applied_masks: dict with keys 'text', 'hatch', 'line' containing the mask hashes/checksums
+        self._working_image_cache: Optional[tuple] = None
         
         # Performance: Debouncing for display updates
         self._update_display_pending = False
@@ -452,6 +498,22 @@ class SegmenterApp:
                                    fg=t["accent"], bg=t["bg"], font=("Segoe UI", 9))
         self.group_count.pack(anchor=tk.W, padx=8, pady=2)
         
+        # Pixel selection mode section
+        pixel_section = CollapsibleFrame(frame, "Pixel Selection", theme=t)
+        pixel_section.pack(fill=tk.X, padx=8, pady=4)
+        
+        self.pixel_selection_mode_var = tk.BooleanVar()
+        ttk.Checkbutton(pixel_section.content, text="Pixel Selection Mode", 
+                        variable=self.pixel_selection_mode_var,
+                        command=self._toggle_pixel_selection_mode).pack(anchor=tk.W, padx=8, pady=2)
+        # Use regular tk.Label for ttk.Label doesn't support fg/bg directly
+        tk.Label(pixel_section.content, 
+                 text="When enabled, selection tools\ncreate pixel selections instead\nof objects. Right-click for actions.",
+                 fg=t["fg"], bg=t["bg"], font=("Segoe UI", 8),
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=8, pady=2)
+        ttk.Button(pixel_section.content, text="Clear Selection",
+                   command=self._clear_pixel_selection).pack(fill=tk.X, padx=8, pady=4)
+        
         # Current view section
         view_section = CollapsibleFrame(frame, "Current View", theme=t)
         view_section.pack(fill=tk.X, padx=8, pady=4)
@@ -667,12 +729,16 @@ class SegmenterApp:
     def _get_current_page(self) -> Optional[PageTab]:
         return self.pages.get(self.current_page_id)
     
-    def _get_working_image(self, page: PageTab) -> np.ndarray:
+    def _get_mask_hash(self, mask: Optional[np.ndarray]) -> Optional[int]:
+        """Get a hash/checksum of a mask for change detection."""
+        if mask is None:
+            return None
+        # Use a simple hash of mask shape and sum of pixel values
+        # This is fast and sufficient for detecting changes
+        return hash((mask.shape, int(np.sum(mask))))
+    
+    def _get_working_image(self, page: PageTab, use_cache: bool = True) -> np.ndarray:
         """Get image with text/hatch/line hidden based on category visibility."""
-        # Only copy if we need to modify, otherwise use view
-        image = page.original_image.copy()  # Need copy since we'll modify pixels
-        h, w = image.shape[:2]
-        
         # Check category visibility (not page hide flags)
         mark_text_cat = self.categories.get("mark_text")
         mark_hatch_cat = self.categories.get("mark_hatch")
@@ -682,50 +748,190 @@ class SegmenterApp:
         should_hide_hatching = mark_hatch_cat is not None and not mark_hatch_cat.visible
         should_hide_lines = mark_line_cat is not None and not mark_line_cat.visible
         
-        print(f"DEBUG _get_working_image: mark_text visible={mark_text_cat.visible if mark_text_cat else 'N/A'}, "
-              f"mark_hatch visible={mark_hatch_cat.visible if mark_hatch_cat else 'N/A'}, "
-              f"mark_line visible={mark_line_cat.visible if mark_line_cat else 'N/A'}")
+        # Create visibility state key for caching
+        visibility_state = (
+            should_hide_text,
+            should_hide_hatching,
+            should_hide_lines,
+            page.tab_id
+        )
+        
+        # Get current mask hashes
+        h, w = page.original_image.shape[:2]
+        text_mask = getattr(page, 'combined_text_mask', None) if should_hide_text else None
+        hatch_mask = getattr(page, 'combined_hatch_mask', None) if should_hide_hatching else None
+        line_mask = getattr(page, 'combined_line_mask', None) if should_hide_lines else None
+        
+        current_mask_hashes = {
+            'text': self._get_mask_hash(text_mask),
+            'hatch': self._get_mask_hash(hatch_mask),
+            'line': self._get_mask_hash(line_mask)
+        }
+        
+        # Check cache and update incrementally if possible
+        if use_cache and self._working_image_cache is not None:
+            cached_page_id, cached_visibility, cached_image, cached_mask_hashes = self._working_image_cache
+            if cached_page_id == page.tab_id and cached_visibility == visibility_state:
+                # Check if masks have changed
+                masks_changed = False
+                updated_image = cached_image.copy()
+                
+                # Incrementally update for each mask type
+                for mask_type in ['text', 'hatch', 'line']:
+                    old_hash = cached_mask_hashes.get(mask_type)
+                    new_hash = current_mask_hashes.get(mask_type)
+                    
+                    if old_hash != new_hash:
+                        masks_changed = True
+                        # Update this mask type in the cached image
+                        if mask_type == 'text' and should_hide_text and text_mask is not None and text_mask.shape == (h, w):
+                            updated_image[text_mask > 0] = [255, 255, 255]
+                        elif mask_type == 'hatch' and should_hide_hatching and hatch_mask is not None and hatch_mask.shape == (h, w):
+                            updated_image[hatch_mask > 0] = [255, 255, 255]
+                        elif mask_type == 'line' and should_hide_lines and line_mask is not None and line_mask.shape == (h, w):
+                            updated_image[line_mask > 0] = [255, 255, 255]
+                
+                if not masks_changed:
+                    # No changes, return cached image
+                    return cached_image.copy()
+                else:
+                    # Masks changed, update cache with new image and hashes
+                    self._working_image_cache = (page.tab_id, visibility_state, updated_image, current_mask_hashes)
+                    return updated_image
+        
+        # Need to recompute from scratch
+        image = page.original_image.copy()  # Need copy since we'll modify pixels
         
         # Apply text mask if category is hidden
-        if should_hide_text:
-            text_mask = getattr(page, 'combined_text_mask', None)
-            if text_mask is not None:
-                if text_mask.shape == (h, w):
-                    mask_pixels = np.sum(text_mask > 0)
-                    print(f"DEBUG _get_working_image: Hiding {mask_pixels} text pixels (category hidden)")
-                    image[text_mask > 0] = [255, 255, 255]
-                else:
-                    print(f"DEBUG _get_working_image: Text mask shape mismatch {text_mask.shape} vs {(h, w)}")
-            else:
-                print(f"DEBUG _get_working_image: should_hide_text=True but combined_text_mask is None")
+        if should_hide_text and text_mask is not None and text_mask.shape == (h, w):
+            image[text_mask > 0] = [255, 255, 255]
         
         # Apply hatching mask if category is hidden
-        if should_hide_hatching:
-            hatch_mask = getattr(page, 'combined_hatch_mask', None)
-            if hatch_mask is not None:
-                if hatch_mask.shape == (h, w):
-                    mask_pixels = np.sum(hatch_mask > 0)
-                    print(f"DEBUG _get_working_image: Hiding {mask_pixels} hatch pixels (category hidden)")
-                    image[hatch_mask > 0] = [255, 255, 255]
-                else:
-                    print(f"DEBUG _get_working_image: Hatch mask shape mismatch {hatch_mask.shape} vs {(h, w)}")
-            else:
-                print(f"DEBUG _get_working_image: should_hide_hatching=True but combined_hatch_mask is None")
+        if should_hide_hatching and hatch_mask is not None and hatch_mask.shape == (h, w):
+            image[hatch_mask > 0] = [255, 255, 255]
         
         # Apply line mask if category is hidden
-        if should_hide_lines:
-            line_mask = getattr(page, 'combined_line_mask', None)
-            if line_mask is not None:
-                if line_mask.shape == (h, w):
-                    mask_pixels = np.sum(line_mask > 0)
-                    print(f"DEBUG _get_working_image: Hiding {mask_pixels} line pixels (category hidden)")
-                    image[line_mask > 0] = [255, 255, 255]
-                else:
-                    print(f"DEBUG _get_working_image: Line mask shape mismatch {line_mask.shape} vs {(h, w)}")
-            else:
-                print(f"DEBUG _get_working_image: should_hide_lines=True but combined_line_mask is None")
+        if should_hide_lines and line_mask is not None and line_mask.shape == (h, w):
+            image[line_mask > 0] = [255, 255, 255]
+        
+        # Update cache
+        if use_cache:
+            self._working_image_cache = (page.tab_id, visibility_state, image.copy(), current_mask_hashes)
         
         return image
+    
+    def _invalidate_working_image_cache(self):
+        """Invalidate the working image cache (call when masks or visibility change)."""
+        self._working_image_cache = None
+    
+    def _update_working_image_cache_for_mask(self, page: PageTab, mask_type: str, new_mask: Optional[np.ndarray]):
+        """
+        Incrementally update the working image cache when a mask is added/updated.
+        For removal, use _update_working_image_cache_for_mask_with_old instead.
+        """
+        # This is a convenience wrapper that gets the old mask from the page
+        # (but it may already be updated, so use with_old version for deletions)
+        old_mask = None
+        if mask_type == 'text':
+            old_mask = getattr(page, 'combined_text_mask', None)
+        elif mask_type == 'hatch':
+            old_mask = getattr(page, 'combined_hatch_mask', None)
+        elif mask_type == 'line':
+            old_mask = getattr(page, 'combined_line_mask', None)
+        
+        self._update_working_image_cache_for_mask_with_old(page, mask_type, new_mask, old_mask)
+    
+    def _update_working_image_cache_for_mask_with_old(self, page: PageTab, mask_type: str, 
+                                                      new_mask: Optional[np.ndarray], 
+                                                      old_mask: Optional[np.ndarray]):
+        """
+        Incrementally update the working image cache when a mask is added/updated/removed.
+        
+        Handles both addition (hide pixels) and removal (unhide pixels) of masks.
+        
+        Args:
+            page: The page being updated
+            mask_type: 'text', 'hatch', or 'line'
+            new_mask: The new combined mask (after update)
+            old_mask: The old combined mask (before update) - needed for restoration
+        """
+        if self._working_image_cache is None:
+            return  # No cache to update
+        
+        cached_page_id, cached_visibility, cached_image, cached_mask_hashes = self._working_image_cache
+        
+        # Check if this update applies to the cached page and visibility
+        mark_text_cat = self.categories.get("mark_text")
+        mark_hatch_cat = self.categories.get("mark_hatch")
+        mark_line_cat = self.categories.get("mark_line")
+        
+        should_hide_text = mark_text_cat is not None and not mark_text_cat.visible
+        should_hide_hatching = mark_hatch_cat is not None and not mark_hatch_cat.visible
+        should_hide_lines = mark_line_cat is not None and not mark_line_cat.visible
+        
+        visibility_state = (
+            should_hide_text,
+            should_hide_hatching,
+            should_hide_lines,
+            page.tab_id
+        )
+        
+        if cached_page_id == page.tab_id and cached_visibility == visibility_state:
+            h, w = cached_image.shape[:2]
+            
+            # Handle mask removal: restore pixels from original image
+            if old_mask is not None and old_mask.shape == (h, w):
+                # Find pixels that were in old mask but not in new mask (pixels to restore)
+                if new_mask is not None and new_mask.shape == (h, w):
+                    pixels_to_restore = (old_mask > 0) & (new_mask == 0)
+                else:
+                    # New mask is None or wrong size - restore all old mask pixels
+                    pixels_to_restore = (old_mask > 0)
+                
+                if np.any(pixels_to_restore):
+                    # Check if pixels should still be hidden by OTHER mask types
+                    # Build combined mask of OTHER types (excluding this mask_type)
+                    other_masks_combined = np.zeros((h, w), dtype=np.uint8)
+                    if mask_type != 'text' and should_hide_text:
+                        other_text_mask = getattr(page, 'combined_text_mask', None)
+                        if other_text_mask is not None and other_text_mask.shape == (h, w):
+                            other_masks_combined = np.maximum(other_masks_combined, other_text_mask)
+                    if mask_type != 'hatch' and should_hide_hatching:
+                        other_hatch_mask = getattr(page, 'combined_hatch_mask', None)
+                        if other_hatch_mask is not None and other_hatch_mask.shape == (h, w):
+                            other_masks_combined = np.maximum(other_masks_combined, other_hatch_mask)
+                    if mask_type != 'line' and should_hide_lines:
+                        other_line_mask = getattr(page, 'combined_line_mask', None)
+                        if other_line_mask is not None and other_line_mask.shape == (h, w):
+                            other_masks_combined = np.maximum(other_masks_combined, other_line_mask)
+                    
+                    # Only restore pixels that are NOT in other masks
+                    pixels_to_restore = pixels_to_restore & (other_masks_combined == 0)
+                    
+                    if np.any(pixels_to_restore):
+                        # Restore pixels from original image (only those not hidden by other masks)
+                        cached_image[pixels_to_restore] = page.original_image[pixels_to_restore]
+            
+            # Handle mask addition/update: hide pixels in new mask
+            if new_mask is not None and new_mask.shape == (h, w):
+                # Check if this mask type should be applied
+                should_apply = False
+                if mask_type == 'text' and should_hide_text:
+                    should_apply = True
+                elif mask_type == 'hatch' and should_hide_hatching:
+                    should_apply = True
+                elif mask_type == 'line' and should_hide_lines:
+                    should_apply = True
+                
+                if should_apply:
+                    # Hide pixels in the new mask
+                    cached_image[new_mask > 0] = [255, 255, 255]
+            
+            # Update the mask hash
+            new_hash = self._get_mask_hash(new_mask)
+            cached_mask_hashes[mask_type] = new_hash
+            # Update cache
+            self._working_image_cache = (cached_page_id, cached_visibility, cached_image, cached_mask_hashes)
     
     def _refresh_categories(self):
         """Refresh category list in sidebar."""
@@ -809,6 +1015,9 @@ class SegmenterApp:
         if name in self.categories and name in self.cat_visibility_vars:
             self.categories[name].visible = self.cat_visibility_vars[name].get()
             print(f"DEBUG: Category '{name}' visibility set to {self.categories[name].visible}")
+            # Invalidate working image cache since visibility state changed
+            # (can't incrementally update when visibility changes)
+            self._invalidate_working_image_cache()
             self.renderer.invalidate_cache()
             self._update_display(immediate=True)
     
@@ -871,6 +1080,14 @@ class SegmenterApp:
             self.group_mode_elements.clear()
             self.status_var.set("GROUP MODE: Create elements to group together")
         self._update_group_count()
+    
+    def _toggle_pixel_selection_mode(self):
+        """Toggle pixel selection mode on/off."""
+        pixel_mode = self.pixel_selection_mode_var.get()
+        if pixel_mode:
+            self.status_var.set("PIXEL SELECTION MODE: Selection tools will create pixel selections")
+        else:
+            self.status_var.set("")
     
     def _update_group_count(self):
         self.group_count.config(text=f"Elements: {len(self.group_mode_elements)}")
@@ -1336,10 +1553,18 @@ class SegmenterApp:
         # Update tree view and workspace state
         if objects_created > 0:
             self.workspace_modified = True
-            self._update_tree()
+            # Get the last created object ID for selection
+            last_obj_id = None
+            if objects_created > 0:
+                mark_text_objs = [o for o in self.all_objects if o.category == 'mark_text']
+                if mark_text_objs:
+                    last_obj_id = mark_text_objs[-1].object_id
+            self._update_tree(preserve_state=True, select_object_id=last_obj_id)
             total_mark_text = sum(1 for o in self.all_objects if o.category == 'mark_text')
             print(f"DEBUG: Added {objects_created} mark_text objects. Total mark_text objects: {total_mark_text}")
             print(f"DEBUG: Tree should now show {total_mark_text} mark_text objects")
+            # Invalidate cache since text mask changed
+            self._invalidate_working_image_cache()
         else:
             print(f"DEBUG: No objects created from {len(regions)} regions (masks_missing={masks_missing})")
         return objects_created
@@ -1674,11 +1899,11 @@ class SegmenterApp:
         else:
             self.view_menu.entryconfig(5, label="Hide Hatching")
         
-        # Ruler toggle (index 9)
+        # Ruler toggle (index 10, not 9 - index 9 is a separator)
         if self.settings.show_ruler:
-            self.view_menu.entryconfig(9, label="Hide Ruler")
+            self.view_menu.entryconfig(10, label="Hide Ruler")
         else:
-            self.view_menu.entryconfig(9, label="Show Ruler")
+            self.view_menu.entryconfig(10, label="Show Ruler")
     
     def _show_settings_dialog(self):
         """Show the settings/preferences dialog."""
@@ -1876,15 +2101,16 @@ class SegmenterApp:
         })
         
         # Incrementally update combined text mask (much faster than full recompute)
+        old_mask = getattr(page, 'combined_text_mask', None)
         if hasattr(page, 'combined_text_mask') and page.combined_text_mask is not None:
             # Just add this mask to the existing combined mask
             page.combined_text_mask = np.maximum(page.combined_text_mask, mask)
-            # Invalidate cache key to force update on next full recompute
-            if hasattr(page, '_text_mask_cache_key'):
-                page._text_mask_cache_key = None
         else:
             # First mask - just use it directly
             page.combined_text_mask = mask.copy()
+        
+        # Update working image cache incrementally
+        self._update_working_image_cache_for_mask_with_old(page, 'text', page.combined_text_mask, old_mask)
         
         self.workspace_modified = True
         self.renderer.invalidate_cache()
@@ -1906,15 +2132,16 @@ class SegmenterApp:
         })
         
         # Incrementally update combined hatching mask (much faster than full recompute)
+        old_mask = getattr(page, 'combined_hatch_mask', None)
         if hasattr(page, 'combined_hatch_mask') and page.combined_hatch_mask is not None:
             # Just add this mask to the existing combined mask
             page.combined_hatch_mask = np.maximum(page.combined_hatch_mask, mask)
-            # Invalidate cache key to force update on next full recompute
-            if hasattr(page, '_hatch_mask_cache_key'):
-                page._hatch_mask_cache_key = None
         else:
             # First mask - just use it directly
             page.combined_hatch_mask = mask.copy()
+        
+        # Update working image cache incrementally
+        self._update_working_image_cache_for_mask_with_old(page, 'hatch', page.combined_hatch_mask, old_mask)
         
         self.workspace_modified = True
         self.renderer.invalidate_cache()
@@ -2030,6 +2257,147 @@ class SegmenterApp:
             'text_distance': min_text_dist
         }
     
+    def _trace_line_with_findline(self, page: PageTab, user_points: List[tuple]) -> Optional[np.ndarray]:
+        """
+        Use findline functionality to trace a line from user points.
+        Returns a mask of the traced line, or None if tracing fails.
+        """
+        if not FINDLINE_AVAILABLE:
+            # Fallback to simple line mask if findline not available
+            h, w = page.original_image.shape[:2]
+            return self.engine.create_line_mask((h, w), user_points)
+        
+        try:
+            # Get working image (respects category visibility)
+            working_img = self._get_working_image(page)
+            if working_img is None:
+                return None
+            
+            h, w = working_img.shape[:2]
+            
+            # Step 1: Convert to monochrome
+            binary = convert_to_monochrome(working_img)
+            
+            # Step 2: Skeletonize
+            skeleton = skeletonize_image(binary)
+            
+            # Step 3: Find nearest skeleton points for user points
+            skeleton_points = []
+            for x, y in user_points:
+                nearest = find_nearest_skeleton_point(skeleton, x, y, search_radius=50)
+                if nearest:
+                    skeleton_points.append(nearest)
+                else:
+                    skeleton_points.append((x, y))  # Use original point as fallback
+            
+            # Step 4: Trace line between points
+            all_traced_points = []
+            for i in range(len(skeleton_points) - 1):
+                start_x, start_y = skeleton_points[i]
+                end_x, end_y = skeleton_points[i + 1]
+                segment_path = trace_between_points(skeleton, start_x, start_y, end_x, end_y)
+                if segment_path:
+                    all_traced_points.extend(segment_path)
+            
+            if not all_traced_points or len(all_traced_points) < 5:
+                # Fallback to simple line mask if tracing fails
+                return self.engine.create_line_mask((h, w), user_points)
+            
+            # Step 5: Measure line thickness
+            thickness = measure_line_thickness(working_img, all_traced_points)
+            
+            # Step 6: Select line pixels with collision detection
+            collision_threshold = 200  # Background threshold
+            line_mask = select_line_pixels(
+                working_img, 
+                all_traced_points, 
+                thickness, 
+                skeleton, 
+                user_points,
+                collision_threshold
+            )
+            
+            # Step 7: Expand mask to include all non-white pixels at edges
+            # This finds actual line edges without affecting thickness calculations
+            line_mask = self._expand_mask_to_edges(working_img, line_mask, collision_threshold)
+            
+            return line_mask
+            
+        except Exception as e:
+            print(f"Error in findline tracing: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback to simple line mask on error
+            h, w = page.original_image.shape[:2]
+            return self.engine.create_line_mask((h, w), user_points)
+    
+    def _expand_mask_to_edges(self, image: np.ndarray, mask: np.ndarray, threshold: int = 200) -> np.ndarray:
+        """
+        Expand mask to include all non-white (dark) pixels around the edges.
+        This ensures full line coverage without affecting thickness calculations.
+        
+        Args:
+            image: Original grayscale or BGR image
+            mask: Binary mask to expand
+            threshold: Pixel value threshold (pixels below this are considered dark/line)
+        
+        Returns:
+            Expanded mask
+        """
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image.copy()
+        
+        h, w = mask.shape
+        expanded_mask = mask.copy()
+        
+        # Find edge pixels of the current mask
+        # Use morphological gradient to find edges
+        kernel = np.ones((3, 3), np.uint8)
+        mask_edges = cv2.morphologyEx(mask, cv2.MORPH_GRADIENT, kernel)
+        
+        # For each edge pixel, check neighbors in the original image
+        # If neighbor is dark (below threshold), add it to the mask
+        edge_pixels = np.where(mask_edges > 0)
+        
+        for y, x in zip(edge_pixels[0], edge_pixels[1]):
+            # Check 8-connected neighbors
+            for dy in [-1, 0, 1]:
+                for dx in [-1, 0, 1]:
+                    if dx == 0 and dy == 0:
+                        continue
+                    
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < h and 0 <= nx < w:
+                        # If neighbor is not already in mask and is dark (part of line)
+                        if expanded_mask[ny, nx] == 0 and gray[ny, nx] < threshold:
+                            expanded_mask[ny, nx] = 255
+        
+        # Iterate a few times to catch multi-pixel edges
+        # But limit iterations to avoid expanding too far
+        for iteration in range(2):  # 2 iterations should be enough
+            new_edges = cv2.morphologyEx(expanded_mask, cv2.MORPH_GRADIENT, kernel)
+            edge_pixels = np.where(new_edges > 0)
+            
+            added_any = False
+            for y, x in zip(edge_pixels[0], edge_pixels[1]):
+                for dy in [-1, 0, 1]:
+                    for dx in [-1, 0, 1]:
+                        if dx == 0 and dy == 0:
+                            continue
+                        
+                        ny, nx = y + dy, x + dx
+                        if 0 <= ny < h and 0 <= nx < w:
+                            if expanded_mask[ny, nx] == 0 and gray[ny, nx] < threshold:
+                                expanded_mask[ny, nx] = 255
+                                added_any = True
+            
+            if not added_any:
+                break  # No more pixels to add
+        
+        return expanded_mask
+    
     def _add_manual_line_region(self, page: PageTab, mask: np.ndarray, points: list, mode: str = "flood"):
         """Add a manually marked leader line region."""
         if not hasattr(page, 'manual_line_regions'):
@@ -2092,14 +2460,26 @@ class SegmenterApp:
         # Add to all_objects
         self.all_objects.append(obj)
         self.workspace_modified = True
-        self._update_tree()
         
-        # Update combined line mask using the centralized function
-        # This ensures all mark_line objects (from regions and from all_objects) are included
-        self._update_combined_line_mask(page, force_recompute=True)
+        # Update tree preserving expansion state and selecting the new object
+        # (Don't trigger display update here - defer until after mask update)
+        self._update_tree(preserve_state=True, select_object_id=obj.object_id)
         
-        self.workspace_modified = True
-        self.renderer.invalidate_cache()
+        # Update combined line mask incrementally (much faster than force_recompute)
+        # Just add this new mask to the existing combined mask
+        old_mask = getattr(page, 'combined_line_mask', None)
+        if hasattr(page, 'combined_line_mask') and page.combined_line_mask is not None:
+            # Incrementally add this mask
+            page.combined_line_mask = np.maximum(page.combined_line_mask, mask)
+        else:
+            # First mask - just use it directly
+            page.combined_line_mask = mask.copy()
+        
+        # Update working image cache incrementally (handles addition)
+        self._update_working_image_cache_for_mask_with_old(page, 'line', page.combined_line_mask, old_mask)
+        
+        # Defer display update - don't render immediately (like rect mode)
+        # Display will be updated when user finishes the operation
         
         # Count existing mark_line objects to determine next number
         mark_line_objects = [o for o in self.all_objects if o.category == "mark_line"]
@@ -2127,8 +2507,8 @@ class SegmenterApp:
                 obj.name = f"ml-{next_number}"
                 self.status_var.set(f"Added line region ml-{next_number} (not detected as leader)")
             
-            # Update tree to reflect new name
-            self._update_tree()
+            # Update tree to reflect new name (preserve state, select this object)
+            self._update_tree(preserve_state=True, select_object_id=obj.object_id)
         
         # Schedule leader detection after UI update
         self.root.after(100, detect_leader_async)
@@ -2211,6 +2591,15 @@ class SegmenterApp:
         
         print(f"_update_combined_text_mask: auto={auto_count} ({auto_pixels}px), "
               f"manual={manual_count} ({manual_pixels}px), combined={total_pixels}px")
+        # Update working image cache incrementally (handles both addition and removal)
+        page = self._get_current_page()
+        if page and page.tab_id == self.current_page_id:
+            # Get old mask BEFORE updating page (needed for restoration)
+            old_mask = getattr(page, 'combined_text_mask', None)
+            # Update the page's combined mask
+            page.combined_text_mask = combined
+            # Update cache (will handle restoration of removed pixels)
+            self._update_working_image_cache_for_mask_with_old(page, 'text', combined, old_mask)
     
     def _update_combined_hatch_mask(self, page: PageTab, force_recompute: bool = False):
         """
@@ -2284,6 +2673,15 @@ class SegmenterApp:
         
         print(f"_update_combined_hatch_mask: auto={auto_count} ({auto_pixels}px), "
               f"manual={manual_count} ({manual_pixels}px), combined={total_pixels}px")
+        # Update working image cache incrementally (handles both addition and removal)
+        page = self._get_current_page()
+        if page and page.tab_id == self.current_page_id:
+            # Get old mask BEFORE updating page (needed for restoration)
+            old_mask = getattr(page, 'combined_hatch_mask', None)
+            # Update the page's combined mask
+            page.combined_hatch_mask = combined
+            # Update cache (will handle restoration of removed pixels)
+            self._update_working_image_cache_for_mask_with_old(page, 'hatch', combined, old_mask)
     
     def _update_combined_line_mask(self, page: PageTab, force_recompute: bool = False):
         """
@@ -2351,6 +2749,15 @@ class SegmenterApp:
         total_pixels = region_pixels + object_pixels
         print(f"_update_combined_line_mask: regions={region_count} ({region_pixels}px), "
               f"objects={object_count} ({object_pixels}px), combined={total_pixels}px")
+        # Update working image cache incrementally (handles both addition and removal)
+        page = self._get_current_page()
+        if page and page.tab_id == self.current_page_id:
+            # Get old mask BEFORE updating page (needed for restoration)
+            old_mask = getattr(page, 'combined_line_mask', None)
+            # Update the page's combined mask
+            page.combined_line_mask = combined
+            # Update cache (will handle restoration of removed pixels)
+            self._update_working_image_cache_for_mask_with_old(page, 'line', combined, old_mask)
     
     def _remove_manual_text_region(self, page: PageTab, region_id: str, update_display: bool = True):
         """Remove a manual text region by ID."""
@@ -2402,6 +2809,8 @@ class SegmenterApp:
             from_workspace: If True, don't auto-fit zoom (preserve loaded zoom level)
         """
         self.pages[page.tab_id] = page
+        # Invalidate cache when new page is added (different page/image)
+        self._invalidate_working_image_cache()
         
         # Create main frame with rulers
         frame = ttk.Frame(self.notebook)
@@ -2493,17 +2902,22 @@ class SegmenterApp:
         page.ruler_size = ruler_size
         
         self.notebook.add(frame, text=page.display_name)
-        self.notebook.select(frame)
-        self.current_page_id = page.tab_id
-        self.workspace_modified = True
         
-        # Fit to screen after canvas is properly sized (only if not loading from workspace)
-        if from_workspace:
-            # Loading from workspace - just update display, don't change zoom
-            self.root.after(300, lambda: (self._update_display(), self._draw_rulers(page)))
-        else:
+        # Only select and render if this is a new page (not loading from workspace)
+        # When loading from workspace, only the active page will be selected/rendered
+        if not from_workspace:
+            self.notebook.select(frame)
+            self.current_page_id = page.tab_id
+            self.workspace_modified = True
             # New page - fit to screen
             self.root.after(300, lambda: (self._zoom_fit(), self._update_display(), self._draw_rulers(page)))
+        else:
+            # Loading from workspace - don't render yet, will be rendered when selected
+            # Only set current_page_id if this is the first page or if it's marked as active
+            if page.active or self.current_page_id is None:
+                self.notebook.select(frame)
+                self.current_page_id = page.tab_id
+            # Don't call _update_display here - it will be called after all pages are loaded
     
     def _on_tab_changed(self, event):
         try:
@@ -2511,6 +2925,8 @@ class SegmenterApp:
             for tid, page in self.pages.items():
                 if hasattr(page, 'frame') and str(page.frame) == selected:
                     self.current_page_id = tid
+                    # Invalidate cache when switching pages (different page/image)
+                    self._invalidate_working_image_cache()
                     self._update_view_menu_labels()  # Update menu for new page
                     self._update_display()
                     self._update_tree()
@@ -2565,21 +2981,152 @@ class SegmenterApp:
             self._finish_polyline()
     
     def _on_right_click(self, event):
+        """Handle right-click on canvas - show context menu or remove point."""
+        # If drawing a polyline, remove last point
         if self.current_points:
             self.current_points.pop()
             self._redraw_points()
+            return
+        
+        # Cancel move operations on right-click
+        if self.is_moving_pixels:
+            self.is_moving_pixels = False
+            self.pixel_move_start = None
+            self.pixel_move_offset = None
+            page = self._get_current_page()
+            if page and hasattr(page, 'canvas'):
+                page.canvas.config(cursor="crosshair")
+            self._update_display()
+            return
+        
+        if self.is_moving_objects:
+            self.is_moving_objects = False
+            self.object_move_start = None
+            self.object_move_offset = None
+            page = self._get_current_page()
+            if page and hasattr(page, 'canvas'):
+                page.canvas.config(cursor="crosshair")
+            self._update_display()
+            return
+        
+        # If we have pixel selection or object selection, show context menu
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        x, y = self._canvas_to_image(event.x, event.y)
+        h, w = page.original_image.shape[:2]
+        if not (0 <= x < w and 0 <= y < h):
+            return
+        
+        # Check if we have pixel selection or object selection
+        has_pixel_selection = self.selected_pixel_mask is not None
+        has_object_selection = len(self.selected_object_ids) > 0 or len(self.selected_element_ids) > 0
+        
+        if has_pixel_selection or has_object_selection:
+            self._show_canvas_context_menu(event, x, y, has_pixel_selection)
+    
+    def _show_canvas_context_menu(self, event, x: int, y: int, has_pixel_selection: bool):
+        """Show context menu for canvas selections."""
+        menu = tk.Menu(self.root, tearoff=0, bg=self.theme["menu_bg"], 
+                      fg=self.theme["menu_fg"],
+                      activebackground=self.theme["menu_hover"],
+                      activeforeground=self.theme["selection_fg"])
+        
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        if has_pixel_selection:
+            # Pixel selection menu
+            menu.add_command(label="Move Selection", command=lambda: self._start_move_pixels())
+            menu.add_separator()
+            menu.add_command(label="Add to Hidden Text", command=lambda: self._add_pixels_to_hidden_category("mark_text"))
+            menu.add_command(label="Add to Hidden Hatching", command=lambda: self._add_pixels_to_hidden_category("mark_hatch"))
+            menu.add_command(label="Add to Hidden Lines", command=lambda: self._add_pixels_to_hidden_category("mark_line"))
+            menu.add_separator()
+            menu.add_command(label="Duplicate Selection", command=self._duplicate_pixel_selection)
+            menu.add_separator()
+            menu.add_command(label="Clear Selection", command=self._clear_pixel_selection)
+        elif len(self.selected_object_ids) > 0 or len(self.selected_element_ids) > 0:
+            # Object/element selection menu - extend existing functionality
+            menu.add_command(label="Duplicate", command=self._duplicate_selected)
+            menu.add_separator()
+            # Check if we can add selected elements to hidden categories
+            if len(self.selected_element_ids) > 0:
+                menu.add_command(label="Add to Hidden Text", command=lambda: self._add_elements_to_hidden_category("mark_text"))
+                menu.add_command(label="Add to Hidden Hatching", command=lambda: self._add_elements_to_hidden_category("mark_hatch"))
+                menu.add_command(label="Add to Hidden Lines", command=lambda: self._add_elements_to_hidden_category("mark_line"))
+                menu.add_separator()
+        
+        # Show menu
+        menu.tk_popup(event.x_root, event.y_root)
     
     def _on_drag(self, event):
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        x, y = self._canvas_to_image(event.x, event.y)
+        
+        # Handle pixel movement
+        if self.is_moving_pixels and self.selected_pixel_mask is not None and self.selected_pixel_bbox:
+            if self.pixel_move_start is None:
+                self.pixel_move_start = (x, y)
+                self.pixel_move_offset = (0, 0)
+            else:
+                start_x, start_y = self.pixel_move_start
+                offset_x = x - start_x
+                offset_y = y - start_y
+                self.pixel_move_offset = (offset_x, offset_y)
+                self._update_display()  # Show preview of move
+            return
+        
+        # Handle object/element movement
+        if self.is_moving_objects:
+            if self.object_move_start is None:
+                self.object_move_start = (x, y)
+                self.object_move_offset = (0, 0)
+            else:
+                start_x, start_y = self.object_move_start
+                offset_x = x - start_x
+                offset_y = y - start_y
+                self.object_move_offset = (offset_x, offset_y)
+                self._update_display()  # Show preview of move
+            return
+        
         if self.current_mode == "rect" and self.is_drawing and self.rect_start:
-            x, y = self._canvas_to_image(event.x, event.y)
             self.rect_current = (x, y)
             self._redraw_rectangle()
         elif self.current_mode == "freeform" and self.is_drawing:
-            x, y = self._canvas_to_image(event.x, event.y)
             self.current_points.append((x, y))
             self._redraw_points()
     
     def _on_release(self, event):
+        # Handle pixel movement completion
+        if self.is_moving_pixels and self.pixel_move_offset is not None:
+            offset_x, offset_y = self.pixel_move_offset
+            self._finish_move_pixels(offset_x, offset_y)
+            self.is_moving_pixels = False
+            self.pixel_move_start = None
+            self.pixel_move_offset = None
+            page = self._get_current_page()
+            if page and hasattr(page, 'canvas'):
+                page.canvas.config(cursor="crosshair")
+            return
+        
+        # Handle object/element movement completion
+        if self.is_moving_objects and self.object_move_offset is not None:
+            offset_x, offset_y = self.object_move_offset
+            self._finish_move_objects(offset_x, offset_y)
+            self.is_moving_objects = False
+            self.object_move_start = None
+            self.object_move_offset = None
+            page = self._get_current_page()
+            if page and hasattr(page, 'canvas'):
+                page.canvas.config(cursor="crosshair")
+            return
+        
         if self.current_mode == "rect" and self.is_drawing and self.rect_start and self.rect_current:
             x, y = self._canvas_to_image(event.x, event.y)
             self.rect_current = (x, y)
@@ -2701,10 +3248,19 @@ class SegmenterApp:
         if not page:
             return
         
-        cat_name = self.category_var.get() or "planform"
-        cat = self.categories.get(cat_name)
         h, w = page.original_image.shape[:2]
         mask = self.engine.create_polygon_mask((h, w), self.current_points)
+        
+        # Check if pixel selection mode is enabled
+        if self.pixel_selection_mode_var.get():
+            self._set_pixel_selection(mask)
+            self.current_points.clear()
+            self._redraw_points()
+            self.status_var.set("Pixel selection created from polyline")
+            return
+        
+        cat_name = self.category_var.get() or "planform"
+        cat = self.categories.get(cat_name)
         
         # Handle special marker categories
         if cat_name == "mark_text":
@@ -2734,6 +3290,7 @@ class SegmenterApp:
             label_position=self.label_position
         )
         self._add_element(elem)
+        # Note: Planform object detection and storage happens in _add_element
         self.current_points.clear()
         self._redraw_points()
     
@@ -2744,10 +3301,19 @@ class SegmenterApp:
         if not page:
             return
         
-        cat_name = self.category_var.get() or "planform"
-        cat = self.categories.get(cat_name)
         h, w = page.original_image.shape[:2]
         mask = self.engine.create_freeform_mask((h, w), self.current_points)
+        
+        # Check if pixel selection mode is enabled
+        if self.pixel_selection_mode_var.get():
+            self._set_pixel_selection(mask)
+            self.current_points.clear()
+            self._redraw_points()
+            self.status_var.set("Pixel selection created from freeform")
+            return
+        
+        cat_name = self.category_var.get() or "planform"
+        cat = self.categories.get(cat_name)
         
         # Handle special marker categories
         if cat_name == "mark_text":
@@ -2780,6 +3346,22 @@ class SegmenterApp:
         cat_name = self.category_var.get() or "longeron"
         cat = self.categories.get(cat_name)
         h, w = page.original_image.shape[:2]
+        
+        # For mark_line category, use findline functionality (skeletonization, tracing, etc.)
+        if cat_name == "mark_line":
+            mask = self._trace_line_with_findline(page, list(self.current_points))
+            if mask is None:
+                # Fallback to simple line mask
+                mask = self.engine.create_line_mask((h, w), self.current_points)
+            self._add_manual_line_region(page, mask, list(self.current_points), "line")
+            self.current_points.clear()
+            self._redraw_points()
+            # Update display once at the end (like rect mode) - deferred to avoid rendering during creation
+            self.renderer.invalidate_cache()
+            self._update_display()
+            return
+        
+        # For other categories, use simple line mask
         mask = self.engine.create_line_mask((h, w), self.current_points)
         
         # Handle special marker categories
@@ -2790,11 +3372,6 @@ class SegmenterApp:
             return
         elif cat_name == "mark_hatch":
             self._add_manual_hatch_region(page, mask, self.current_points[0], "line")
-            self.current_points.clear()
-            self._redraw_points()
-            return
-        elif cat_name == "mark_line":
-            self._add_manual_line_region(page, mask, list(self.current_points), "line")
             self.current_points.clear()
             self._redraw_points()
             return
@@ -2832,6 +3409,28 @@ class SegmenterApp:
                     # Add element to the last instance of the selected object
                     last_inst = obj.instances[-1]
                     last_inst.elements.append(elem)
+                    
+                    # CRITICAL: If this is a planform, find and store all visible objects within its boundaries
+                    # Do this asynchronously to avoid blocking the UI
+                    if elem.category == "planform" and elem.mode == "polyline" and elem.mask is not None:
+                        # Defer the expensive object finding to avoid blocking
+                        def find_and_store_objects():
+                            try:
+                                objects_within = self._find_objects_within_planform(page, elem.mask, obj.object_id)
+                                self.planform_objects[obj.object_id] = objects_within
+                                print(f"DEBUG: Planform {obj.object_id} ({obj.name}) updated with {len(objects_within)} objects within boundaries")
+                                for obj_id in objects_within:
+                                    o = self._get_object_by_id(obj_id)
+                                    if o:
+                                        print(f"  - {o.name} ({obj_id})")
+                            except Exception as e:
+                                print(f"ERROR finding objects for planform {obj.object_id}: {e}")
+                                import traceback
+                                traceback.print_exc()
+                        
+                        # Run in background to avoid blocking
+                        self.root.after(100, find_and_store_objects)
+                    
                     self.workspace_modified = True
                     self.renderer.invalidate_cache()  # Objects changed
                     
@@ -2869,6 +3468,27 @@ class SegmenterApp:
         new_obj.instances.append(inst)
         self.all_objects.append(new_obj)
         
+        # CRITICAL: If this is a planform, find and store all visible objects within its boundaries
+        # Do this asynchronously to avoid blocking planform creation
+        if elem.category == "planform" and elem.mode == "polyline" and elem.mask is not None:
+            # Defer the expensive object finding to avoid blocking the UI
+            def find_and_store_objects():
+                try:
+                    objects_within = self._find_objects_within_planform(page, elem.mask, new_obj.object_id)
+                    self.planform_objects[new_obj.object_id] = objects_within
+                    print(f"DEBUG: Planform {new_obj.object_id} ({new_obj.name}) created with {len(objects_within)} objects within boundaries")
+                    for obj_id in objects_within:
+                        obj = self._get_object_by_id(obj_id)
+                        if obj:
+                            print(f"  - {obj.name} ({obj_id})")
+                except Exception as e:
+                    print(f"ERROR finding objects for planform {new_obj.object_id}: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # Run in background to avoid blocking - use a short delay to let UI update first
+            self.root.after(50, find_and_store_objects)
+        
         self.workspace_modified = True
         self.renderer.invalidate_cache()  # Objects changed
         self._add_tree_item(new_obj)  # Only add new item
@@ -2885,6 +3505,111 @@ class SegmenterApp:
             if has_instance_on_page:
                 result.append(obj)
         return result
+    
+    def _find_objects_within_planform(self, page: PageTab, planform_mask: np.ndarray, planform_obj_id: str) -> List[str]:
+        """
+        Find all visible objects that fall within the exact boundaries of a planform polyline.
+        
+        Args:
+            page: The current page
+            planform_mask: The planform's polyline mask (not a rectangle)
+            planform_obj_id: The planform object ID to exclude from results
+            
+        Returns:
+            List of object IDs that are within the planform boundaries
+        """
+        try:
+            h, w = page.original_image.shape[:2]
+            if planform_mask.shape != (h, w):
+                print(f"WARNING: Planform mask shape {planform_mask.shape} doesn't match page shape {(h, w)}")
+                return []
+            
+            mark_categories = {"mark_text", "mark_hatch", "mark_line"}
+            objects_within = []
+            
+            # Get visible objects on this page - cache this to avoid repeated calls
+            page_objects = self._get_objects_for_page(page.tab_id)
+            
+            # Early exit if no objects
+            if not page_objects:
+                return []
+            
+            # Pre-check: get bounding box of planform to quickly filter objects
+            ys, xs = np.where(planform_mask > 0)
+            if len(xs) == 0:
+                return []
+            
+            planform_x_min, planform_x_max = int(np.min(xs)), int(np.max(xs)) + 1
+            planform_y_min, planform_y_max = int(np.min(ys)), int(np.max(ys)) + 1
+            
+            for obj in page_objects:
+                # Skip the planform itself and mark_* categories
+                if obj.object_id == planform_obj_id or obj.category in mark_categories:
+                    continue
+                
+                # Skip other planform objects
+                if obj.category == "planform":
+                    continue
+                
+                # Skip objects from invisible categories
+                cat = self.categories.get(obj.category)
+                if not cat or not cat.visible:
+                    continue
+                
+                # Quick bounding box check first - if object's bbox doesn't overlap with planform bbox, skip
+                obj_has_overlap = False
+                for inst in obj.instances:
+                    if inst.page_id == page.tab_id:
+                        for elem in inst.elements:
+                            if elem.mask is not None and elem.mask.shape == (h, w):
+                                # OPTIMIZATION: Faster bounding box calculation
+                                mask_bool = elem.mask > 0
+                                if not np.any(mask_bool):
+                                    continue
+                                
+                                # Get bounding box efficiently using any() instead of np.where on full mask
+                                rows = np.any(mask_bool, axis=1)
+                                cols = np.any(mask_bool, axis=0)
+                                if not np.any(rows) or not np.any(cols):
+                                    continue
+                                
+                                elem_y_min, elem_y_max = np.where(rows)[0][[0, -1]]
+                                elem_x_min, elem_x_max = np.where(cols)[0][[0, -1]]
+                                elem_y_max += 1
+                                elem_x_max += 1
+                                
+                                # Check if bounding boxes overlap
+                                if (elem_x_max < planform_x_min or elem_x_min > planform_x_max or
+                                    elem_y_max < planform_y_min or elem_y_min > planform_y_max):
+                                    continue  # Bounding boxes don't overlap, skip expensive pixel check
+                                
+                                # Only check overlap in the ROI (region of interest) where bboxes overlap
+                                roi_x_min = max(0, min(elem_x_min, planform_x_min))
+                                roi_x_max = min(w, max(elem_x_max, planform_x_max))
+                                roi_y_min = max(0, min(elem_y_min, planform_y_min))
+                                roi_y_max = min(h, max(elem_y_max, planform_y_max))
+                                
+                                # Check overlap only in the ROI - much faster than full image
+                                elem_roi = elem.mask[roi_y_min:roi_y_max, roi_x_min:roi_x_max]
+                                planform_roi = planform_mask[roi_y_min:roi_y_max, roi_x_min:roi_x_max]
+                                pixels_overlap = np.sum((elem_roi > 0) & (planform_roi > 0))
+                                
+                                # Object overlaps if ANY pixels are within the planform polyline
+                                if pixels_overlap > 0:
+                                    obj_has_overlap = True
+                                    break
+                        if obj_has_overlap:
+                            break
+                
+                if obj_has_overlap:
+                    objects_within.append(obj.object_id)
+            
+            return objects_within
+        except Exception as e:
+            print(f"ERROR in _find_objects_within_planform: {e}")
+            import traceback
+            traceback.print_exc()
+            return []  # Return empty list on error to avoid breaking planform creation
     
     def _update_display(self, immediate: bool = False):
         """
@@ -3021,6 +3746,13 @@ class SegmenterApp:
             if hasattr(page, 'combined_line_mask') and page.combined_line_mask is not None:
                 line_mask = page.combined_line_mask
         
+        # Get pixel selection info for rendering
+        pixel_selection_mask = self.selected_pixel_mask
+        pixel_move_offset = self.pixel_move_offset if self.is_moving_pixels else None
+        
+        # Get object move info for rendering
+        object_move_offset = self.object_move_offset if self.is_moving_objects else None
+        
         rendered = self.renderer.render_page(
             page, self.categories, self.zoom_level, self.show_labels,
             self.selected_object_ids, self.selected_instance_ids, self.selected_element_ids,
@@ -3029,7 +3761,10 @@ class SegmenterApp:
             objects=render_objects,
             text_mask=text_mask,
             hatching_mask=hatching_mask,
-            line_mask=line_mask
+            line_mask=line_mask,
+            pixel_selection_mask=pixel_selection_mask,
+            pixel_move_offset=pixel_move_offset,
+            object_move_offset=object_move_offset
         )
         
         pil_img = Image.fromarray(cv2.cvtColor(rendered, cv2.COLOR_BGRA2RGBA))
@@ -3100,7 +3835,7 @@ class SegmenterApp:
         )
     
     def _finish_rectangle(self):
-        """Finish rectangle selection and detect objects."""
+        """Finish rectangle selection and detect objects or create pixel selection."""
         page = self._get_current_page()
         if not page or not self.rect_start or not self.rect_current:
             return
@@ -3120,6 +3855,21 @@ class SegmenterApp:
         self.rect_start = None
         self.rect_current = None
         self.is_drawing = False
+        
+        # Check if pixel selection mode is enabled
+        if self.pixel_selection_mode_var.get():
+            # Create pixel selection from rectangle
+            h, w = page.original_image.shape[:2]
+            mask = np.zeros((h, w), dtype=np.uint8)
+            # Ensure coordinates are within image bounds
+            x_min = max(0, min(w, x_min))
+            x_max = max(0, min(w, x_max))
+            y_min = max(0, min(h, y_min))
+            y_max = max(0, min(h, y_max))
+            mask[y_min:y_max, x_min:x_max] = 255
+            self._set_pixel_selection(mask)
+            self.status_var.set(f"Pixel selection created: {x_max-x_min}x{y_max-y_min} pixels")
+            return
         
         # Get category
         cat_name = self.category_var.get()
@@ -3530,8 +4280,44 @@ class SegmenterApp:
             self._update_display()
     
     # Tree management
-    def _update_tree(self):
+    def _save_tree_expansion_state(self) -> dict:
+        """Save which categories/nodes are expanded in the tree."""
+        expanded_items = set()
+        if hasattr(self, 'tree_grouping_var') and self.tree_grouping_var.get() == "category":
+            for item in self.object_tree.get_children():
+                if item.startswith("cat_"):
+                    if self.object_tree.item(item, "open"):
+                        expanded_items.add(item)
+                # Also check object nodes that might be expanded
+                for child in self.object_tree.get_children(item):
+                    if self.object_tree.item(child, "open"):
+                        expanded_items.add(child)
+        return {'expanded_items': expanded_items}
+    
+    def _restore_tree_expansion_state(self, state: dict):
+        """Restore which categories/nodes are expanded in the tree."""
+        if not state or 'expanded_items' not in state:
+            return
+        expanded_items = state.get('expanded_items', set())
+        if hasattr(self, 'tree_grouping_var') and self.tree_grouping_var.get() == "category":
+            for item in self.object_tree.get_children():
+                if item.startswith("cat_"):
+                    if item in expanded_items:
+                        self.object_tree.item(item, open=True)
+                    else:
+                        self.object_tree.item(item, open=False)
+                # Also restore object node expansion
+                for child in self.object_tree.get_children(item):
+                    if child in expanded_items:
+                        self.object_tree.item(child, open=True)
+    
+    def _update_tree(self, preserve_state: bool = True, select_object_id: Optional[str] = None):
         """Full tree rebuild - shows ALL objects across all pages."""
+        # Save expansion state if requested
+        tree_state = None
+        if preserve_state:
+            tree_state = self._save_tree_expansion_state()
+        
         self.object_tree.delete(*self.object_tree.get_children())
         
         # Update mark_text, mark_hatch, and mark_line counts
@@ -3549,7 +4335,7 @@ class SegmenterApp:
         
         grouping = self.tree_grouping_var.get() if hasattr(self, 'tree_grouping_var') else "category"
         
-        if grouping == "category":
+        if grouping == "none":
             # Flat list - all objects
             for obj in self.all_objects:
                 self._add_tree_item(obj)
@@ -3564,9 +4350,12 @@ class SegmenterApp:
             
             for cat_name in sorted(categories_used.keys()):
                 icon = self._get_tree_icon(cat_name)
-                cat_node = self.object_tree.insert("", "end", iid=f"cat_{cat_name}", 
+                # Check if this category should be expanded (from saved state)
+                cat_node_id = f"cat_{cat_name}"
+                should_expand = tree_state and cat_node_id in tree_state.get('expanded_items', set())
+                cat_node = self.object_tree.insert("", "end", iid=cat_node_id, 
                                                    text=f"📁 {cat_name} ({len(categories_used[cat_name])})",
-                                                   image=icon, open=True)
+                                                   image=icon, open=should_expand)
                 for obj in categories_used[cat_name]:
                     self._add_tree_item(obj, parent=cat_node)
         elif grouping == "view":
@@ -3616,6 +4405,22 @@ class SegmenterApp:
                         for i, elem in enumerate(inst.elements):
                             self.object_tree.insert(node, "end", iid=f"ve_{elem.element_id}", 
                                                     text=f"├ element {i+1}")
+        
+        # Restore expansion state if provided
+        if preserve_state and tree_state:
+            self._restore_tree_expansion_state(tree_state)
+        
+        # Select the specified object if provided
+        if select_object_id:
+            item_id = f"o_{select_object_id}"
+            if self.object_tree.exists(item_id):
+                self.object_tree.selection_set(item_id)
+                self.object_tree.see(item_id)
+                # Also expand parent category if grouped by category
+                if grouping == "category":
+                    parent = self.object_tree.parent(item_id)
+                    if parent and parent.startswith("cat_"):
+                        self.object_tree.item(parent, open=True)
     
     def _get_tree_icon(self, category: str):
         """Get or create icon for a category."""
@@ -3854,6 +4659,8 @@ class SegmenterApp:
             if hasattr(page, 'frame'):
                 self.notebook.select(page.frame)
                 self.current_page_id = page_id
+                # Invalidate cache when switching pages (different page/image)
+                self._invalidate_working_image_cache()
     
     def _get_object_by_id(self, obj_id: str) -> Optional[SegmentedObject]:
         """Get object by ID from global list."""
@@ -3949,6 +4756,8 @@ class SegmenterApp:
                            state="normal" if num_objects == 1 else "disabled")
             menu.add_command(label="Duplicate", command=self._duplicate_object,
                            state="normal" if num_objects == 1 else "disabled")
+            menu.add_command(label="Move", command=self._start_move_objects,
+                           state="normal" if num_objects >= 1 else "disabled")
             menu.add_command(label="Rename", command=lambda: self._start_inline_edit(f"o_{next(iter(self.selected_object_ids))}") if self.selected_object_ids else None,
                            state="normal" if num_objects == 1 else "disabled")
             menu.add_command(label="Edit Attributes", command=self._edit_attributes)
@@ -3968,8 +4777,15 @@ class SegmenterApp:
         
         # Instance actions (when instance is selected but not through object menu)
         elif num_instances >= 1 and num_objects == 0:
+            menu.add_command(label="Move", command=self._start_move_objects)
             menu.add_command(label="Edit Attributes", command=self._edit_attributes)
             menu.add_separator()
+        
+        # Element actions
+        if num_elements >= 1:
+            if num_objects == 0 and num_instances == 0:  # Only elements selected
+                menu.add_command(label="Move", command=self._start_move_objects)
+                menu.add_separator()
         
         # Expand/collapse
         if item:
@@ -4411,6 +5227,11 @@ class SegmenterApp:
         obj_id = next(iter(self.selected_object_ids))
         obj = self._get_object_by_id(obj_id)
         if not obj:
+            messagebox.showwarning("Error", "Selected object not found")
+            return
+        
+        if not obj.instances:
+            messagebox.showwarning("Error", "Object has no instances to duplicate")
             return
         
         import copy
@@ -4422,23 +5243,35 @@ class SegmenterApp:
         )
         
         # Copy all instances
+        total_elements = 0
         for inst in obj.instances:
             new_inst = ObjectInstance(
                 instance_num=inst.instance_num,
                 page_id=inst.page_id,
                 view_type=getattr(inst, 'view_type', ''),
-                attributes=copy.deepcopy(inst.attributes) if hasattr(inst, 'attributes') else None
+                attributes=copy.deepcopy(inst.attributes) if hasattr(inst, 'attributes') and inst.attributes else None
             )
             # Copy elements with new IDs
             for elem in inst.elements:
                 new_elem = SegmentElement(
                     category=elem.category,
+                    mode=elem.mode,
                     mask=elem.mask.copy() if elem.mask is not None else None,
-                    seed_point=elem.seed_point,
-                    points=elem.points.copy() if elem.points else None
+                    points=elem.points.copy() if elem.points else [],
+                    color=elem.color,
+                    label_position=elem.label_position
                 )
                 new_inst.elements.append(new_elem)
-            new_obj.instances.append(new_inst)
+                total_elements += 1
+            
+            # Only add instance if it has elements
+            if new_inst.elements:
+                new_obj.instances.append(new_inst)
+        
+        # Only add object if it has instances with elements
+        if not new_obj.instances:
+            messagebox.showwarning("Error", "Object has no elements to duplicate")
+            return
         
         self.all_objects.append(new_obj)
         self.workspace_modified = True
@@ -4448,13 +5281,516 @@ class SegmenterApp:
         
         # Select the new object
         self.selected_object_ids = {new_obj.object_id}
+        self._update_tree()
+        self._update_display()
+        self.status_var.set(f"Duplicated {obj.name} ({total_elements} elements)")
+    
+    def _duplicate_selected(self):
+        """Duplicate selected objects or elements."""
+        if len(self.selected_object_ids) > 0:
+            self._duplicate_object()
+        elif len(self.selected_element_ids) > 0:
+            # Duplicate selected elements as new objects
+            self._duplicate_elements()
+        elif self.selected_pixel_mask is not None:
+            self._duplicate_pixel_selection()
+    
+    def _duplicate_elements(self):
+        """Duplicate selected elements as new objects."""
+        if not self.selected_element_ids:
+            return
+        
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        # Find all selected elements
+        selected_elements = []
+        for obj in self.all_objects:
+            for inst in obj.instances:
+                if inst.page_id == page.tab_id:
+                    for elem in inst.elements:
+                        if elem.element_id in self.selected_element_ids:
+                            selected_elements.append((obj, inst, elem))
+        
+        if not selected_elements:
+            return
+        
+        # Create new objects for each selected element
+        new_objects = []
+        for obj, inst, elem in selected_elements:
+            # Create new element with copied mask
+            new_elem = SegmentElement(
+                category=elem.category,
+                mode=elem.mode,
+                points=elem.points.copy() if elem.points else [],
+                mask=elem.mask.copy() if elem.mask is not None else None,
+                color=elem.color,
+                label_position=elem.label_position
+            )
+            
+            # Create new instance with the element
+            new_inst = ObjectInstance(
+                instance_num=1,
+                page_id=inst.page_id,
+                view_type=getattr(inst, 'view_type', ''),
+                elements=[new_elem]
+            )
+            
+            # Create new object
+            new_obj = SegmentedObject(
+                name=f"{obj.name}_copy",
+                category=obj.category,
+                instances=[new_inst]
+            )
+            
+            new_objects.append(new_obj)
+            self.all_objects.append(new_obj)
+        
+        self.workspace_modified = True
+        self.renderer.invalidate_cache()
+        for obj in new_objects:
+            self._add_tree_item(obj)
+        self._update_display()
+        self.status_var.set(f"Duplicated {len(new_objects)} element(s)")
+    
+    # Pixel selection and editing functions
+    def _set_pixel_selection(self, mask: np.ndarray):
+        """Set the current pixel selection from a mask."""
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        h, w = page.original_image.shape[:2]
+        if mask.shape != (h, w):
+            # Resize mask if needed
+            mask = cv2.resize(mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+        
+        self.selected_pixel_mask = (mask > 0).astype(np.uint8) * 255
+        
+        # Calculate bounding box
+        ys, xs = np.where(self.selected_pixel_mask > 0)
+        if len(xs) > 0:
+            self.selected_pixel_bbox = (int(np.min(xs)), int(np.min(ys)), 
+                                       int(np.max(xs)) + 1, int(np.max(ys)) + 1)
+        else:
+            self.selected_pixel_bbox = None
+        
+        # Clear object selections when pixel selection is active
+        self.selected_object_ids.clear()
         self.selected_instance_ids.clear()
         self.selected_element_ids.clear()
-        tree_id = f"o_{new_obj.object_id}"
-        if self.object_tree.exists(tree_id):
-            self.object_tree.selection_set(tree_id)
         
-        self.status_var.set(f"Duplicated: {new_obj.name}")
+        self._update_display()
+    
+    def _clear_pixel_selection(self):
+        """Clear the current pixel selection."""
+        self.selected_pixel_mask = None
+        self.selected_pixel_bbox = None
+        self.is_moving_pixels = False
+        self.pixel_move_start = None
+        self.pixel_move_offset = None
+        self._update_display()
+    
+    def _start_move_pixels(self):
+        """Start moving the selected pixels."""
+        if self.selected_pixel_mask is None:
+            return
+        
+        self.is_moving_pixels = True
+        page = self._get_current_page()
+        if page and hasattr(page, 'canvas'):
+            page.canvas.config(cursor="fleur")
+        self.status_var.set("Click and drag to move selected pixels. Right-click to cancel.")
+    
+    def _finish_move_pixels(self, offset_x: int, offset_y: int):
+        """Finish moving pixels by applying the offset."""
+        if self.selected_pixel_mask is None:
+            return
+        
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        h, w = page.original_image.shape[:2]
+        
+        # Create new image with moved pixels
+        new_image = page.original_image.copy()
+        
+        # Extract selected pixels
+        selected_pixels = np.zeros_like(page.original_image)
+        selected_pixels[self.selected_pixel_mask > 0] = page.original_image[self.selected_pixel_mask > 0]
+        
+        # Clear original location (set to white)
+        new_image[self.selected_pixel_mask > 0] = 255
+        
+        # Calculate new position
+        if self.selected_pixel_bbox:
+            x_min, y_min, x_max, y_max = self.selected_pixel_bbox
+            new_x_min = max(0, min(w, x_min + offset_x))
+            new_y_min = max(0, min(h, y_min + offset_y))
+            new_x_max = max(0, min(w, x_max + offset_x))
+            new_y_max = max(0, min(h, y_max + offset_y))
+            
+            # Create new mask at new position
+            new_mask = np.zeros((h, w), dtype=np.uint8)
+            old_h = y_max - y_min
+            old_w = x_max - x_min
+            new_h = new_y_max - new_y_min
+            new_w = new_x_max - new_x_min
+            
+            if new_h > 0 and new_w > 0 and old_h > 0 and old_w > 0:
+                # Extract the selected region
+                old_region = selected_pixels[y_min:y_max, x_min:x_max]
+                # Resize if needed (shouldn't be, but handle edge cases)
+                if new_h != old_h or new_w != old_w:
+                    old_region = cv2.resize(old_region, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+                
+                # Place at new location
+                new_image[new_y_min:new_y_max, new_x_min:new_x_max] = old_region
+                new_mask[new_y_min:new_y_max, new_x_min:new_x_max] = 255
+                
+                # Update selection
+                self.selected_pixel_mask = new_mask
+                self.selected_pixel_bbox = (new_x_min, new_y_min, new_x_max, new_y_max)
+        
+        # Update page image
+        page.original_image = new_image
+        
+        # Invalidate caches
+        self.renderer.invalidate_cache()
+        self._working_image_cache = None
+        
+        self.workspace_modified = True
+        self._update_display()
+        self.status_var.set(f"Moved pixels by ({offset_x}, {offset_y})")
+    
+    def _add_pixels_to_hidden_category(self, category: str):
+        """Add selected pixels to a hidden category (mark_text, mark_hatch, mark_line)."""
+        if self.selected_pixel_mask is None:
+            return
+        
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        h, w = page.original_image.shape[:2]
+        
+        if category == "mark_text":
+            self._add_manual_text_region(page, self.selected_pixel_mask, None, "pixel_selection")
+        elif category == "mark_hatch":
+            self._add_manual_hatch_region(page, self.selected_pixel_mask, None, "pixel_selection")
+        elif category == "mark_line":
+            # For mark_line, we need points - use bounding box corners
+            if self.selected_pixel_bbox:
+                x_min, y_min, x_max, y_max = self.selected_pixel_bbox
+                points = [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max)]
+            else:
+                points = []
+            self._add_manual_line_region(page, self.selected_pixel_mask, points, "pixel_selection")
+        
+        # Clear selection after adding
+        self._clear_pixel_selection()
+        self.status_var.set(f"Added pixels to {category}")
+    
+    def _add_elements_to_hidden_category(self, category: str):
+        """Add selected elements to a hidden category."""
+        if not self.selected_element_ids:
+            return
+        
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        # Find all selected elements and combine their masks
+        combined_mask = None
+        h, w = page.original_image.shape[:2]
+        
+        for obj in self.all_objects:
+            for inst in obj.instances:
+                if inst.page_id == page.tab_id:
+                    for elem in inst.elements:
+                        if elem.element_id in self.selected_element_ids:
+                            if elem.mask is not None and elem.mask.shape == (h, w):
+                                if combined_mask is None:
+                                    combined_mask = np.zeros((h, w), dtype=np.uint8)
+                                combined_mask = np.maximum(combined_mask, elem.mask)
+        
+        if combined_mask is None or np.sum(combined_mask > 0) == 0:
+            return
+        
+        # Add to hidden category
+        if category == "mark_text":
+            self._add_manual_text_region(page, combined_mask, None, "element_selection")
+        elif category == "mark_hatch":
+            self._add_manual_hatch_region(page, combined_mask, None, "element_selection")
+        elif category == "mark_line":
+            # Use bounding box for points
+            ys, xs = np.where(combined_mask > 0)
+            if len(xs) > 0:
+                x_min, x_max = int(np.min(xs)), int(np.max(xs))
+                y_min, y_max = int(np.min(ys)), int(np.max(ys))
+                points = [(x_min, y_min), (x_max, y_min), (x_max, y_max), (x_min, y_max)]
+            else:
+                points = []
+            self._add_manual_line_region(page, combined_mask, points, "element_selection")
+        
+        # Remove the elements from their objects (they're now hidden)
+        for obj in self.all_objects[:]:  # Copy list to avoid modification during iteration
+            for inst in obj.instances[:]:
+                if inst.page_id == page.tab_id:
+                    inst.elements = [e for e in inst.elements if e.element_id not in self.selected_element_ids]
+                    if not inst.elements:
+                        obj.instances.remove(inst)
+            if not obj.instances:
+                self.all_objects.remove(obj)
+        
+        # Clear selections
+        self.selected_element_ids.clear()
+        self.selected_object_ids.clear()
+        self.selected_instance_ids.clear()
+        
+        self.workspace_modified = True
+        self.renderer.invalidate_cache()
+        self._update_tree()
+        self._update_display()
+        self.status_var.set(f"Added elements to {category}")
+    
+    def _duplicate_pixel_selection(self):
+        """Duplicate the selected pixels as a new object."""
+        if self.selected_pixel_mask is None:
+            return
+        
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        h, w = page.original_image.shape[:2]
+        
+        # Get the current category
+        cat_name = self.category_var.get()
+        if not cat_name:
+            cat_name = "textbox"  # Default category
+        
+        cat = self.categories.get(cat_name)
+        if not cat:
+            return
+        
+        # Create element from pixel selection
+        elem = SegmentElement(
+            category=cat_name,
+            mode="pixel_selection",
+            points=[],
+            mask=self.selected_pixel_mask.copy(),
+            color=cat.color_rgb,
+            label_position=self.label_position
+        )
+        
+        # Add as new object
+        self._add_element(elem)
+        
+        # Clear pixel selection
+        self._clear_pixel_selection()
+        self.status_var.set("Duplicated pixels as new object")
+    
+    def _start_move_objects(self):
+        """Start moving selected objects/elements."""
+        if not (self.selected_object_ids or self.selected_instance_ids or self.selected_element_ids):
+            return
+        
+        self.is_moving_objects = True
+        page = self._get_current_page()
+        if page and hasattr(page, 'canvas'):
+            page.canvas.config(cursor="fleur")
+        self.status_var.set("Click and drag to move selected objects. Right-click to cancel.")
+    
+    def _finish_move_objects(self, offset_x: int, offset_y: int):
+        """Finish moving objects/elements by applying the offset."""
+        if offset_x == 0 and offset_y == 0:
+            self.is_moving_objects = False
+            self.object_move_start = None
+            self.object_move_offset = None
+            return
+        
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        h, w = page.original_image.shape[:2]
+        moved_count = 0
+        
+        # CRITICAL: First collect ORIGINAL masks before moving them
+        # We need the original masks to extract pixels from the old location
+        original_masks = []
+        elements_to_move = []
+        
+        # Collect original masks and elements
+        if self.selected_object_ids:
+            for obj_id in self.selected_object_ids:
+                obj = self._get_object_by_id(obj_id)
+                if not obj:
+                    continue
+                for inst in obj.instances:
+                    if inst.page_id == page.tab_id:
+                        for elem in inst.elements:
+                            if elem.mask is not None and elem.mask.shape == (h, w):
+                                original_masks.append(elem.mask.copy())  # Copy before modifying
+                                elements_to_move.append(elem)
+                                moved_count += 1
+        
+        if self.selected_instance_ids:
+            for inst_id in self.selected_instance_ids:
+                for obj in self.all_objects:
+                    for inst in obj.instances:
+                        if inst.instance_id == inst_id and inst.page_id == page.tab_id:
+                            for elem in inst.elements:
+                                if elem.mask is not None and elem.mask.shape == (h, w):
+                                    original_masks.append(elem.mask.copy())
+                                    elements_to_move.append(elem)
+                                    moved_count += 1
+        
+        if self.selected_element_ids:
+            for elem_id in self.selected_element_ids:
+                for obj in self.all_objects:
+                    for inst in obj.instances:
+                        if inst.page_id == page.tab_id:
+                            for elem in inst.elements:
+                                if elem.element_id == elem_id:
+                                    if elem.mask is not None and elem.mask.shape == (h, w):
+                                        original_masks.append(elem.mask.copy())
+                                        elements_to_move.append(elem)
+                                        moved_count += 1
+        
+        if moved_count > 0 and original_masks:
+            # Actually move pixels in the original image
+            new_image = page.original_image.copy()
+            
+            # Combine all original masks
+            combined_mask = np.zeros((h, w), dtype=np.uint8)
+            for mask in original_masks:
+                combined_mask = np.maximum(combined_mask, mask)
+            
+            # Translate mask to new location
+            M = np.float32([[1, 0, offset_x], [0, 1, offset_y]])
+            translated_mask = cv2.warpAffine(combined_mask, M, (w, h),
+                                           flags=cv2.INTER_NEAREST,
+                                           borderMode=cv2.BORDER_CONSTANT,
+                                           borderValue=0)
+            
+            # Check if there are other objects at the destination location
+            # Get IDs of objects being moved (to exclude them from overlap check)
+            moved_object_ids = set()
+            moved_element_ids = set()
+            if self.selected_object_ids:
+                moved_object_ids.update(self.selected_object_ids)
+            if self.selected_instance_ids:
+                for inst_id in self.selected_instance_ids:
+                    for obj in self.all_objects:
+                        for inst in obj.instances:
+                            if inst.instance_id == inst_id:
+                                moved_object_ids.add(obj.object_id)
+            if self.selected_element_ids:
+                moved_element_ids.update(self.selected_element_ids)
+            
+            # Check for overlap with other objects at destination
+            has_overlap = False
+            page_objects = self._get_objects_for_page(page.tab_id)
+            for obj in page_objects:
+                # Skip objects being moved
+                if obj.object_id in moved_object_ids:
+                    continue
+                
+                # Skip mark categories (they don't have visible pixels)
+                if obj.category in ["mark_text", "mark_hatch", "mark_line"]:
+                    continue
+                
+                # Check if any element of this object overlaps with translated mask
+                for inst in obj.instances:
+                    if inst.page_id == page.tab_id:
+                        for elem in inst.elements:
+                            # Skip elements being moved
+                            if elem.element_id in moved_element_ids:
+                                continue
+                            
+                            if elem.mask is not None and elem.mask.shape == (h, w):
+                                # Check pixel overlap
+                                overlap = np.sum((elem.mask > 0) & (translated_mask > 0))
+                                if overlap > 0:
+                                    has_overlap = True
+                                    break
+                        if has_overlap:
+                            break
+                if has_overlap:
+                    break
+            
+            # Extract pixels from old location using ORIGINAL mask
+            if len(new_image.shape) == 3:
+                # BGR image
+                selected_pixels = np.zeros_like(new_image)
+                mask_3d = combined_mask[:, :, np.newaxis]
+                selected_pixels = np.where(mask_3d > 0, new_image, 0)
+            else:
+                # Grayscale
+                selected_pixels = np.where(combined_mask > 0, new_image, 0)
+            
+            # Translate the selected pixels to the new location
+            M = np.float32([[1, 0, offset_x], [0, 1, offset_y]])
+            translated_pixels = cv2.warpAffine(selected_pixels, M, (w, h),
+                                              flags=cv2.INTER_NEAREST,
+                                              borderMode=cv2.BORDER_CONSTANT,
+                                              borderValue=0)
+            
+            if has_overlap:
+                # COPY pixels: Place at new location without clearing old location
+                # This allows multiple objects to share the same pixels
+                if len(new_image.shape) == 3:
+                    mask_3d = translated_mask[:, :, np.newaxis]
+                    # Blend: place new pixels where mask is set, keep existing where not
+                    new_image = np.where(mask_3d > 0, translated_pixels, new_image)
+                else:
+                    new_image = np.where(translated_mask > 0, translated_pixels, new_image)
+                action = "Copied"
+            else:
+                # MOVE pixels: Clear old location and place at new location
+                # Clear old location (set to white)
+                if len(new_image.shape) == 3:
+                    new_image[combined_mask > 0] = [255, 255, 255]
+                    # Place translated pixels where the translated mask is set
+                    mask_3d = translated_mask[:, :, np.newaxis]
+                    new_image = np.where(mask_3d > 0, translated_pixels, new_image)
+                else:
+                    new_image[combined_mask > 0] = 255
+                    new_image = np.where(translated_mask > 0, translated_pixels, new_image)
+                action = "Moved"
+            
+            # Update page image
+            page.original_image = new_image
+            
+            # NOW move the masks and points
+            M = np.float32([[1, 0, offset_x], [0, 1, offset_y]])
+            for elem in elements_to_move:
+                if elem.mask is not None and elem.mask.shape == (h, w):
+                    # Translate mask
+                    elem.mask = cv2.warpAffine(elem.mask, M, (w, h),
+                                              flags=cv2.INTER_NEAREST,
+                                              borderMode=cv2.BORDER_CONSTANT,
+                                              borderValue=0)
+                    # Translate points
+                    if elem.points:
+                        elem.points = [(x + offset_x, y + offset_y) 
+                                      for x, y in elem.points]
+            
+            self.renderer.invalidate_cache()
+            self._working_image_cache = None
+            self.workspace_modified = True
+            self._update_display()
+            self.status_var.set(f"{action} {moved_count} element(s) by ({offset_x}, {offset_y})")
+        else:
+            self.status_var.set("No elements to move")
+        
+        self.is_moving_objects = False
+        self.object_move_start = None
+        self.object_move_offset = None
     
     def _delete_selected(self):
         modified_objs = set()
@@ -4856,6 +6192,9 @@ class SegmenterApp:
                 self.notebook.forget(self.pages[tid].frame)
             del self.pages[tid]
         
+        # Invalidate cache when loading new workspace (different pages/images)
+        self._invalidate_working_image_cache()
+        
         # Clear selections
         self.selected_object_ids.clear()
         self.selected_instance_ids.clear()
@@ -4934,13 +6273,13 @@ class SegmenterApp:
         if data.view_state:
             self._restore_view_state(data.view_state)
         
-        # Force a small delay to ensure all UI is settled, then redraw
+        # Only render the current/active page - other pages will be rendered lazily when selected
         def _final_refresh():
-            self.renderer.invalidate_cache()
-            self._update_display()
-            # Re-draw rulers for current page
+            # Only render the current page
             page = self._get_current_page()
             if page:
+                self.renderer.invalidate_cache()
+                self._update_display()
                 self._draw_rulers(page)
                 # Restore scroll position if available
                 if hasattr(page, 'scroll_x') and hasattr(page, 'scroll_y'):
@@ -5004,19 +6343,46 @@ class SegmenterApp:
             messagebox.showwarning("Invalid Selection", "Please select a planform object.")
             return
         
-        # Get the planform's mask (combined mask from all its elements on this page)
+        # CRITICAL: Recreate planform mask from polyline points, not from stored mask
+        # The stored mask might include pixels from other planforms or be corrupted
+        # Recreating from points ensures we get the exact polyline shape
         h, w = page.original_image.shape[:2]
         planform_mask = np.zeros((h, w), dtype=np.uint8)
+        planform_points = []
         
         for inst in planform_obj.instances:
             if inst.page_id == page.tab_id:
                 for elem in inst.elements:
-                    if elem.mask is not None and elem.mask.shape == (h, w):
+                    if elem.mode == "polyline" and len(elem.points) >= 3:
+                        # Recreate mask from polyline points - this is the true planform shape
+                        elem_mask = self.engine.create_polygon_mask((h, w), elem.points)
+                        planform_mask = np.maximum(planform_mask, elem_mask)
+                        planform_points.extend(elem.points)
+                    elif elem.mask is not None and elem.mask.shape == (h, w):
+                        # Fallback: use stored mask if points are not available
                         planform_mask = np.maximum(planform_mask, elem.mask)
         
-        if np.sum(planform_mask > 0) == 0:
+        planform_pixel_count = np.sum(planform_mask > 0)
+        print(f"DEBUG: Recreated planform mask from points has {planform_pixel_count} non-white pixels (shape: {h}x{w})")
+        
+        if planform_pixel_count == 0:
             messagebox.showwarning("Invalid Planform", "The selected planform has no valid mask.")
             return
+        
+        # Debug: Check if planform mask looks like a rectangle (bounding box filled)
+        ys, xs = np.where(planform_mask > 0)
+        if len(xs) > 0:
+            x_min_debug, x_max_debug = int(np.min(xs)), int(np.max(xs)) + 1
+            y_min_debug, y_max_debug = int(np.min(ys)), int(np.max(ys)) + 1
+            bbox_area = (x_max_debug - x_min_debug) * (y_max_debug - y_min_debug)
+            fill_ratio = planform_pixel_count / bbox_area if bbox_area > 0 else 0
+            print(f"DEBUG: Planform bounding box: ({x_min_debug}, {y_min_debug}) to ({x_max_debug}, {y_max_debug})")
+            print(f"DEBUG: Planform bounding box area: {bbox_area} pixels")
+            print(f"DEBUG: Planform fill ratio: {fill_ratio:.2%} (100% = rectangle, lower = polyline shape)")
+            if fill_ratio > 0.95:
+                print(f"WARNING: Planform mask appears to be a filled rectangle, not a polyline!")
+            else:
+                print(f"DEBUG: Planform mask appears to be a polyline shape (not a rectangle)")
         
         # Get the working image (with hidden pixels removed) and crop to planform bounds
         working_image = self._get_working_image(page)
@@ -5043,6 +6409,31 @@ class SegmenterApp:
         
         # Adjust planform mask coordinates for cropped image
         cropped_planform_mask = planform_mask[y_min:y_max, x_min:x_max].copy()
+        cropped_planform_pixel_count = np.sum(cropped_planform_mask > 0)
+        print(f"DEBUG: Cropped planform mask has {cropped_planform_pixel_count} non-white pixels (cropped shape: {cropped_h}x{cropped_w})")
+        
+        # CRITICAL: Mask the cropped image to only include pixels within the planform polyline boundary
+        # Set all pixels outside the polyline to white (background)
+        # This ensures we only copy pixels that are within the exact polyline boundary, not the entire bounding box
+        pixels_inside_polyline = np.sum(cropped_planform_mask > 0)
+        total_cropped_pixels = cropped_h * cropped_w
+        
+        # Create a boolean mask for pixels inside the polyline
+        inside_mask = cropped_planform_mask > 0
+        
+        # Apply mask to image - set pixels outside polyline to white
+        if len(cropped_image.shape) == 3:  # BGR or RGB image (3 channels)
+            # Broadcast mask to 3 channels: (H, W) -> (H, W, 1) -> (H, W, 3)
+            inside_mask_3d = inside_mask[:, :, np.newaxis]
+            # Set pixels outside planform to white (255, 255, 255) for BGR
+            cropped_image = np.where(inside_mask_3d, cropped_image, 255)
+        else:  # Grayscale image (2D)
+            # Set pixels outside planform to white (255)
+            cropped_image = np.where(inside_mask, cropped_image, 255)
+        
+        print(f"DEBUG: Cropped image has {total_cropped_pixels:,} total pixels")
+        print(f"DEBUG: Only {pixels_inside_polyline:,} pixels are within planform polyline ({pixels_inside_polyline/total_cropped_pixels*100:.2f}%)")
+        print(f"DEBUG: {total_cropped_pixels - pixels_inside_polyline:,} pixels outside polyline have been set to white (background)")
         
         # Ask for a name for the new view tab
         view_name = simpledialog.askstring(
@@ -5078,22 +6469,65 @@ class SegmenterApp:
                 # Adjust element masks and points for cropped coordinates
                 new_elements = []
                 for elem in inst.elements:
-                    if elem.mask is not None and elem.mask.shape == (h, w):
-                        # Crop the mask
-                        cropped_elem_mask = elem.mask[y_min:y_max, x_min:x_max].copy()
-                        # Adjust points
-                        adjusted_points = [(x - x_min, y - y_min) for x, y in elem.points]
-                        
-                        new_elem = SegmentElement(
-                            element_id=elem.element_id,
-                            category=elem.category,
-                            mode=elem.mode,
-                            points=adjusted_points,
-                            mask=cropped_elem_mask,
-                            color=elem.color,
-                            label_position=elem.label_position
-                        )
-                        new_elements.append(new_elem)
+                    # CRITICAL: Recreate element mask from points if it's a polyline
+                    # This ensures we only copy the exact polyline shape, not corrupted stored masks
+                    if elem.mode == "polyline" and len(elem.points) >= 3:
+                        # Recreate mask from points - this is the true planform shape
+                        elem_mask_recreated = self.engine.create_polygon_mask((h, w), elem.points)
+                    elif elem.mask is not None and elem.mask.shape == (h, w):
+                        # Use stored mask for other modes
+                        elem_mask_recreated = elem.mask.copy()
+                    else:
+                        continue
+                    
+                    # CRITICAL: Filter to only include pixels within the recreated planform polyline
+                    # This ensures we don't copy corners of other planforms
+                    elem_mask_inside_planform = elem_mask_recreated.copy()
+                    elem_mask_inside_planform[planform_mask == 0] = 0  # Remove pixels outside polyline
+                    
+                    # Check if element has any pixels after filtering
+                    if np.sum(elem_mask_inside_planform > 0) == 0:
+                        continue  # Element is completely outside planform polyline
+                    
+                    # Crop the filtered mask to bounding box
+                    cropped_elem_mask = elem_mask_inside_planform[y_min:y_max, x_min:x_max].copy()
+                    
+                    # Double-check: ensure all pixels are within cropped planform mask
+                    cropped_planform_mask = planform_mask[y_min:y_max, x_min:x_max]
+                    cropped_elem_mask = cropped_elem_mask & cropped_planform_mask
+                    
+                    # Only include if there are pixels after filtering
+                    cropped_elem_pixel_count = np.sum(cropped_elem_mask > 0)
+                    if cropped_elem_pixel_count == 0:
+                        continue
+                    
+                    # Debug: Show original vs filtered pixel counts
+                    original_elem_pixel_count = np.sum(elem_mask_recreated > 0)
+                    filtered_elem_pixel_count = np.sum(elem_mask_inside_planform > 0)
+                    print(f"DEBUG: Planform element {elem.element_id}:")
+                    print(f"  Recreated mask pixels: {original_elem_pixel_count}")
+                    print(f"  After filtering to planform polyline: {filtered_elem_pixel_count}")
+                    print(f"  After cropping to bounding box: {cropped_elem_pixel_count}")
+                    
+                    # Adjust points (filter to only points within cropped area AND planform polyline)
+                    adjusted_points = []
+                    for x, y in elem.points:
+                        # Check if point is within bounding box
+                        if x_min <= x < x_max and y_min <= y < y_max:
+                            # Check if point is within planform mask (polyline)
+                            if planform_mask[y, x] > 0:
+                                adjusted_points.append((x - x_min, y - y_min))
+                    
+                    new_elem = SegmentElement(
+                        element_id=elem.element_id,
+                        category=elem.category,
+                        mode=elem.mode,
+                        points=adjusted_points,
+                        mask=cropped_elem_mask,
+                        color=elem.color,
+                        label_position=elem.label_position
+                    )
+                    new_elements.append(new_elem)
                 
                 if new_elements:
                     new_inst = ObjectInstance(
@@ -5107,89 +6541,135 @@ class SegmenterApp:
                     new_planform_instances.append(new_inst)
         
         if new_planform_instances:
+            # Debug: Count total pixels in copied planform
+            total_copied_planform_pixels = 0
+            for inst in new_planform_instances:
+                for elem in inst.elements:
+                    if elem.mask is not None:
+                        total_copied_planform_pixels += np.sum(elem.mask > 0)
+            print(f"DEBUG: Copied planform has {total_copied_planform_pixels} non-white pixels")
+            print(f"DEBUG: Expected {cropped_planform_pixel_count} pixels (from cropped planform mask)")
+            if abs(total_copied_planform_pixels - cropped_planform_pixel_count) > 10:
+                print(f"WARNING: Pixel count mismatch! Copied: {total_copied_planform_pixels}, Expected: {cropped_planform_pixel_count}")
+            else:
+                print(f"DEBUG: Pixel counts match! ✓")
+            
             new_planform_obj = SegmentedObject(
                 object_id=f"{planform_obj.object_id}_{new_page.tab_id}",
-                name=planform_obj.name,
+                name=view_name,  # Use view name to distinguish from original planform
                 category=planform_obj.category,
                 instances=new_planform_instances
             )
             self.all_objects.append(new_planform_obj)
             copied_count += 1
         
-        # Now copy objects that are inside the planform boundary
-        for obj in self.all_objects:
-            # Skip the planform itself (already copied) and mark_* categories
-            if obj.object_id == planform_obj.object_id or obj.category in mark_categories:
+        # CRITICAL: Use the stored list of objects that were within the planform at creation time
+        # This ensures we only copy objects that were actually within the polyline boundaries
+        objects_within_planform = self.planform_objects.get(planform_obj.object_id, [])
+        
+        if not objects_within_planform:
+            # Fallback: if no stored list, find objects now (for backward compatibility)
+            print(f"DEBUG: No stored objects list for planform {planform_obj.object_id}, finding objects now...")
+            objects_within_planform = self._find_objects_within_planform(page, planform_mask, planform_obj.object_id)
+            self.planform_objects[planform_obj.object_id] = objects_within_planform
+        
+        print(f"DEBUG: Planform {planform_obj.object_id} has {len(objects_within_planform)} stored objects within boundaries")
+        for obj_id in objects_within_planform:
+            obj = self._get_object_by_id(obj_id)
+            if obj:
+                print(f"  - {obj.name} ({obj_id})")
+        
+        # Now copy only the stored objects that were within the planform at creation time
+        for obj_id in objects_within_planform:
+            obj = self._get_object_by_id(obj_id)
+            if not obj:
                 continue
             
-            # Only check objects with instances on the current page
+            # Verify object still exists and is on this page
             has_instance_on_page = any(inst.page_id == page.tab_id for inst in obj.instances)
             if not has_instance_on_page:
                 continue
             
-            # Check if object is inside planform boundary
-            # An object is inside if any of its element masks overlap with the planform mask
-            is_inside = False
+            # Copy the object
+            # Create a copy of the object with adjusted coordinates
+            # Only include parts of the object that are within the planform
+            new_instances = []
             for inst in obj.instances:
                 if inst.page_id == page.tab_id:
+                    # Adjust element masks and points for cropped coordinates
+                    new_elements = []
                     for elem in inst.elements:
                         if elem.mask is not None and elem.mask.shape == (h, w):
-                            # Check if element overlaps with planform mask
-                            overlap = np.sum((elem.mask > 0) & (planform_mask > 0))
-                            element_pixels = np.sum(elem.mask > 0)
-                            # Consider inside if at least 50% of element is inside planform
-                            if element_pixels > 0 and overlap / element_pixels > 0.5:
-                                is_inside = True
-                                break
-                    if is_inside:
-                        break
-            
-            if is_inside:
-                # Create a copy of the object with adjusted coordinates
-                new_instances = []
-                for inst in obj.instances:
-                    if inst.page_id == page.tab_id:
-                        # Adjust element masks and points for cropped coordinates
-                        new_elements = []
-                        for elem in inst.elements:
-                            if elem.mask is not None and elem.mask.shape == (h, w):
-                                # Crop the mask
-                                cropped_elem_mask = elem.mask[y_min:y_max, x_min:x_max].copy()
-                                # Adjust points
-                                adjusted_points = [(x - x_min, y - y_min) for x, y in elem.points]
-                                
-                                new_elem = SegmentElement(
-                                    element_id=elem.element_id,
-                                    category=elem.category,
-                                    mode=elem.mode,
-                                    points=adjusted_points,
-                                    mask=cropped_elem_mask,
-                                    color=elem.color,
-                                    label_position=elem.label_position
-                                )
-                                new_elements.append(new_elem)
-                        
-                        if new_elements:
-                            new_inst = ObjectInstance(
-                                instance_id=f"{inst.instance_id}_{new_page.tab_id}",
-                                instance_num=inst.instance_num,
-                                elements=new_elements,
-                                page_id=new_page.tab_id,
-                                view_type=inst.view_type,
-                                attributes=inst.attributes
+                            # CRITICAL: First filter element mask to only include pixels within planform polyline
+                            # This uses the actual polyline shape, not the bounding box
+                            elem_mask_inside_planform = elem.mask.copy()
+                            elem_mask_inside_planform[planform_mask == 0] = 0  # Remove pixels outside polyline
+                            
+                            # Check if element has any pixels after filtering to planform
+                            if np.sum(elem_mask_inside_planform > 0) == 0:
+                                continue  # Element is completely outside planform polyline
+                            
+                            # Now crop to bounding box for the new view
+                            cropped_elem_mask = elem_mask_inside_planform[y_min:y_max, x_min:x_max].copy()
+                            
+                            # Double-check: ensure all pixels are within cropped planform mask
+                            cropped_planform_mask = planform_mask[y_min:y_max, x_min:x_max]
+                            cropped_elem_mask = cropped_elem_mask & cropped_planform_mask
+                            
+                            # Only include element if it has pixels after filtering
+                            copied_elem_pixel_count = np.sum(cropped_elem_mask > 0)
+                            if copied_elem_pixel_count == 0:
+                                continue
+                            
+                            # Debug: Show pixel counts for copied object
+                            original_obj_pixels = np.sum(elem.mask > 0)
+                            filtered_obj_pixels = np.sum(elem_mask_inside_planform > 0)
+                            print(f"DEBUG: Copying object {obj.object_id} ({obj.name}), element {elem.element_id}:")
+                            print(f"  Original pixels: {original_obj_pixels}")
+                            print(f"  After filtering to planform: {filtered_obj_pixels}")
+                            print(f"  After cropping: {copied_elem_pixel_count}")
+                            
+                            # Adjust points (filter to only points within cropped area AND planform polyline)
+                            adjusted_points = []
+                            for x, y in elem.points:
+                                # Check if point is within bounding box
+                                if x_min <= x < x_max and y_min <= y < y_max:
+                                    # Check if point is within planform mask (polyline)
+                                    if planform_mask[y, x] > 0:
+                                        adjusted_points.append((x - x_min, y - y_min))
+                            
+                            new_elem = SegmentElement(
+                                element_id=elem.element_id,
+                                category=elem.category,
+                                mode=elem.mode,
+                                points=adjusted_points,
+                                mask=cropped_elem_mask,
+                                color=elem.color,
+                                label_position=elem.label_position
                             )
-                            new_instances.append(new_inst)
-                
-                if new_instances:
-                    # Create new object with copied instances
-                    new_obj = SegmentedObject(
-                        object_id=f"{obj.object_id}_{new_page.tab_id}",
-                        name=obj.name,
-                        category=obj.category,
-                        instances=new_instances
-                    )
-                    self.all_objects.append(new_obj)
-                    copied_count += 1
+                            new_elements.append(new_elem)
+                    
+                    if new_elements:
+                        new_inst = ObjectInstance(
+                            instance_id=f"{inst.instance_id}_{new_page.tab_id}",
+                            instance_num=inst.instance_num,
+                            elements=new_elements,
+                            page_id=new_page.tab_id,
+                            view_type=inst.view_type,
+                            attributes=inst.attributes
+                        )
+                        new_instances.append(new_inst)
+            
+            if new_instances:
+                # Create new object with copied instances
+                new_obj = SegmentedObject(
+                    object_id=f"{obj.object_id}_{new_page.tab_id}",
+                    name=obj.name,
+                    category=obj.category,
+                    instances=new_instances
+                )
+                self.all_objects.append(new_obj)
+                copied_count += 1
         
         # Initialize empty masks for the new page (no mark_* objects)
         new_page.combined_text_mask = None

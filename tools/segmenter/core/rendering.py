@@ -80,7 +80,10 @@ class Renderer:
                     objects: list = None,
                     text_mask: np.ndarray = None,
                     hatching_mask: np.ndarray = None,
-                    line_mask: np.ndarray = None) -> np.ndarray:
+                    line_mask: np.ndarray = None,
+                    pixel_selection_mask: np.ndarray = None,
+                    pixel_move_offset: Tuple[int, int] = None,
+                    object_move_offset: Tuple[int, int] = None) -> np.ndarray:
         """
         Render a page with all overlays (with caching).
         
@@ -138,7 +141,8 @@ class Renderer:
         # Draw highlights (lightweight - only contours)
         self._highlight_selected(
             blended, objects,
-            selected_object_ids, selected_instance_ids, selected_element_ids
+            selected_object_ids, selected_instance_ids, selected_element_ids,
+            move_offset=object_move_offset
         )
         
         # Draw pending group elements
@@ -174,22 +178,14 @@ class Renderer:
         hide_mask = np.zeros((h, w), dtype=np.uint8)
         
         if text_mask is not None and text_mask.shape == (h, w):
-            pixels_hidden = np.sum(text_mask > 0)
-            print(f"  _render_base: Hiding {pixels_hidden} text pixels")
             base_image[text_mask > 0] = [255, 255, 255]  # White in BGR
             hide_mask = np.maximum(hide_mask, text_mask)
-        else:
-            print(f"  _render_base: NO text_mask (mask={text_mask is not None})")
             
         if hatching_mask is not None and hatching_mask.shape == (h, w):
-            pixels_hidden = np.sum(hatching_mask > 0)
-            print(f"  _render_base: Hiding {pixels_hidden} hatch pixels")
             base_image[hatching_mask > 0] = [255, 255, 255]  # White in BGR
             hide_mask = np.maximum(hide_mask, hatching_mask)
         
         if line_mask is not None and line_mask.shape == (h, w):
-            pixels_hidden = np.sum(line_mask > 0)
-            print(f"  _render_base: Hiding {pixels_hidden} line pixels")
             base_image[line_mask > 0] = [255, 255, 255]  # White in BGR
             hide_mask = np.maximum(hide_mask, line_mask)
         
@@ -321,7 +317,8 @@ class Renderer:
                             objects: List[SegmentedObject],
                             selected_object_ids: Set[str],
                             selected_instance_ids: Set[str],
-                            selected_element_ids: Set[str]):
+                            selected_element_ids: Set[str],
+                            move_offset: Tuple[int, int] = None):
         """
         Draw highlight borders around selected elements.
         
@@ -329,6 +326,8 @@ class Renderer:
         - If elements are selected, only highlight those specific elements
         - If instances are selected (no elements), highlight all elements in those instances
         - If objects are selected (no instances/elements), highlight all elements in those objects
+        
+        If move_offset is provided, shows preview of moved location.
         """
         # Determine what level of selection we have
         has_element_selection = bool(selected_element_ids)
@@ -363,6 +362,24 @@ class Renderer:
                                 cv2.drawContours(image, contours, -1, (0, 0, 0, 255), 4)
                                 # Yellow highlight contour on top
                                 cv2.drawContours(image, contours, -1, (0, 255, 255, 255), 2)
+                                
+                                # If moving, draw preview at new location
+                                if move_offset is not None:
+                                    offset_x, offset_y = move_offset
+                                    # Translate contours
+                                    M = np.float32([[1, 0, offset_x], [0, 1, offset_y]])
+                                    shifted_contours = []
+                                    for contour in contours:
+                                        shifted = contour.astype(np.float32)
+                                        shifted = cv2.transform(shifted.reshape(-1, 1, 2), M).reshape(-1, 2)
+                                        shifted_contours.append(shifted.astype(np.int32))
+                                    # Draw cyan dashed outline at new location
+                                    for contour in shifted_contours:
+                                        pts = contour.reshape(-1, 2)
+                                        for i in range(0, len(pts) - 1, 2):
+                                            pt1 = tuple(pts[i])
+                                            pt2 = tuple(pts[min(i + 1, len(pts) - 1)])
+                                            cv2.line(image, pt1, pt2, (255, 255, 0, 255), 2)  # Cyan
                         else:
                             print(f"DEBUG: Element {elem.element_id} has empty mask, skipping highlight")
     
@@ -383,6 +400,64 @@ class Renderer:
                         pt1 = tuple(pts[i])
                         pt2 = tuple(pts[min(i + 1, len(pts) - 1)])
                         cv2.line(image, pt1, pt2, (255, 255, 0, 255), 2)
+    
+    def _draw_pixel_selection(self, image: np.ndarray, mask: np.ndarray, 
+                             move_offset: Tuple[int, int] = None) -> np.ndarray:
+        """Draw pixel selection with optional move preview."""
+        h, w = image.shape[:2]
+        if mask.shape != (h, w):
+            return image
+        
+        # Ensure image is BGRA
+        if len(image.shape) == 3 and image.shape[2] == 3:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2BGRA)
+        elif len(image.shape) == 2:
+            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGRA)
+        
+        # Draw selection outline
+        contours, _ = cv2.findContours(
+            mask.astype(np.uint8),
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+        
+        # Draw selection with semi-transparent yellow fill
+        overlay = image.copy()
+        for contour in contours:
+            # Fill with yellow (semi-transparent)
+            cv2.fillPoly(overlay, [contour], (0, 255, 255, 128))
+            # Outline in yellow
+            cv2.drawContours(overlay, [contour], -1, (0, 255, 255, 255), 2)
+        
+        # If moving, draw preview at new location
+        if move_offset is not None:
+            offset_x, offset_y = move_offset
+            # Create shifted mask
+            M = np.float32([[1, 0, offset_x], [0, 1, offset_y]])
+            h_mask, w_mask = mask.shape
+            shifted_mask = cv2.warpAffine(mask.astype(np.uint8), M, (w_mask, h_mask))
+            
+            # Draw preview at new location (cyan dashed outline)
+            shifted_contours, _ = cv2.findContours(
+                shifted_mask,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE
+            )
+            for contour in shifted_contours:
+                pts = contour.reshape(-1, 2).astype(int)
+                # Draw dashed line
+                for i in range(0, len(pts) - 1, 2):
+                    pt1 = tuple(pts[i])
+                    pt2 = tuple(pts[min(i + 1, len(pts) - 1)])
+                    cv2.line(overlay, pt1, pt2, (255, 255, 0, 255), 2)  # Cyan
+        
+        # Blend overlay with alpha
+        mask_alpha = (overlay[:, :, 3] > 0).astype(np.float32)
+        for c in range(3):
+            image[:, :, c] = (image[:, :, c] * (1 - mask_alpha * 0.3) + 
+                             overlay[:, :, c] * mask_alpha * 0.3).astype(np.uint8)
+        
+        return image
     
     def _draw_labels(self,
                      image: np.ndarray,
