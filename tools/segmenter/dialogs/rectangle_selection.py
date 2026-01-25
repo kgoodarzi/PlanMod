@@ -23,6 +23,7 @@ class RectangleSelectionDialog:
         self.theme = theme
         self.leader_flags = leader_flags or [False] * len(detected_masks)
         self.result: Optional[List[int]] = None
+        self.create_combined: bool = False  # Flag for combined object creation
         
         # Store ROI coordinates
         h, w = page.original_image.shape[:2]
@@ -167,6 +168,14 @@ class RectangleSelectionDialog:
             command=self._cancel
         ).pack(side=tk.RIGHT, padx=5)
         
+        # Only show combined button if multiple objects are detected
+        if len(self.detected_masks) > 1:
+            ttk.Button(
+                button_frame,
+                text="Create as Combined Object",
+                command=self._ok_combined
+            ).pack(side=tk.RIGHT, padx=5)
+        
         ttk.Button(
             button_frame,
             text="Create Selected",
@@ -255,9 +264,22 @@ class RectangleSelectionDialog:
     def _ok(self):
         """OK button - return selected indices."""
         self.result = sorted(self.selected_indices)
+        self.create_combined = False
+        self.dialog.destroy()
+    
+    def _ok_combined(self):
+        """OK button for combined object - return selected indices with combined flag."""
+        if len(self.selected_indices) < 2:
+            # Need at least 2 objects to combine
+            import tkinter.messagebox as mb
+            mb.showwarning("Invalid Selection", "Please select at least 2 objects to combine.")
+            return
+        self.result = sorted(self.selected_indices)
+        self.create_combined = True
         self.dialog.destroy()
     
     def _cancel(self):
         """Cancel button - return None."""
         self.result = None
+        self.create_combined = False
         self.dialog.destroy()

@@ -52,7 +52,11 @@ from tools.segmenter.models import (
 from tools.segmenter.models.attributes import ObjectAttributes
 from tools.segmenter.core import SegmentationEngine, Renderer
 from tools.segmenter.io import WorkspaceManager, PDFReader
-from tools.segmenter.dialogs import PDFLoaderDialog, LabelScanDialog, AttributeDialog, SettingsDialog
+from tools.segmenter.dialogs import (
+    PDFLoaderDialog, LabelScanDialog, AttributeDialog, SettingsDialog, 
+    DeleteObjectDialog, PageSelectionDialog, NestingConfigDialog, NestingResultsDialog
+)
+from tools.segmenter.core.nesting import NestingEngine, check_rectpack_available
 from tools.segmenter.widgets import (
     CollapsibleFrame, PositionGrid,
     ResizableLayout, StatusBar, PanelConfig, DockablePanel
@@ -406,6 +410,14 @@ class SegmenterApp:
         view_menu.add_command(label="Zoom In", command=self._zoom_in, accelerator="Ctrl++")
         view_menu.add_command(label="Zoom Out", command=self._zoom_out, accelerator="Ctrl+-")
         view_menu.add_command(label="Fit to Window", command=self._zoom_fit, accelerator="Ctrl+0")
+        
+        # Tools menu
+        tools_menu = tk.Menu(menubar, tearoff=0, bg=t["menu_bg"], fg=t["menu_fg"],
+                            activebackground=t["menu_hover"], activeforeground=t["selection_fg"])
+        menubar.add_cascade(label="Tools", menu=tools_menu)
+        tools_menu.add_command(label="Nest Parts on Sheets...", command=self._show_nesting_dialog)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="Scan for Labels...", command=self._scan_for_labels)
     
     def _setup_tools_panel(self):
         """Setup the tools panel (left sidebar)."""
@@ -1049,6 +1061,30 @@ class SegmenterApp:
     
     def _cancel(self):
         """Cancel current operation."""
+        # Cancel move operations
+        if self.is_moving_objects:
+            self.is_moving_objects = False
+            self.object_move_start = None
+            self.object_move_offset = None
+            page = self._get_current_page()
+            if page and hasattr(page, 'canvas'):
+                page.canvas.config(cursor="crosshair")
+            self._update_display()
+            self.status_var.set("Move cancelled")
+            return
+        
+        if self.is_moving_pixels:
+            self.is_moving_pixels = False
+            self.pixel_move_start = None
+            self.pixel_move_offset = None
+            page = self._get_current_page()
+            if page and hasattr(page, 'canvas'):
+                page.canvas.config(cursor="crosshair")
+            self._update_display()
+            self.status_var.set("Move cancelled")
+            return
+        
+        # Cancel drawing operations
         self.current_points.clear()
         self.is_drawing = False
         self.rect_start = None
@@ -1937,6 +1973,125 @@ class SegmenterApp:
         
         dialog = SettingsDialog(self.root, self.settings, self.theme, on_save)
         dialog.show()
+    
+    def _show_nesting_dialog(self):
+        """Show the nesting configuration dialog."""
+        if not check_rectpack_available():
+            messagebox.showerror(
+                "Missing Library",
+                "The rectpack library is required for nesting.\n\n"
+                "Install it with: pip install rectpack"
+            )
+            return
+        
+        if not self.all_objects:
+            messagebox.showwarning("No Objects", "No objects to nest. Create some objects first.")
+            return
+        
+        page = self._get_current_page()
+        if not page:
+            messagebox.showwarning("No Page", "No page selected.")
+            return
+        
+        # Show configuration dialog
+        dialog = NestingConfigDialog(
+            self.root, 
+            self.all_objects, 
+            self.pages, 
+            self.categories,
+            page.tab_id,
+            self.theme
+        )
+        self.root.wait_window(dialog)
+        
+        if not dialog.result:
+            return
+        
+        # Run nesting
+        self.status_var.set("Nesting parts...")
+        self.root.update()
+        
+        try:
+            config = dialog.result
+            
+            # Create nesting engine
+            spacing_pixels = int(config["spacing"] * config["dpi"])
+            engine = NestingEngine(
+                spacing=spacing_pixels,
+                allow_rotation=config["allow_rotation"]
+            )
+            
+            # Run nesting
+            results = engine.nest_by_material(
+                config["material_groups"],
+                config["sheet_configs"],
+                self.pages,
+                dpi=config["dpi"],
+                respect_quantity=config["respect_quantity"]
+            )
+            
+            if not results:
+                messagebox.showinfo("No Results", "No parts could be nested. Check that objects have valid masks.")
+                self.status_var.set("Nesting completed - no results")
+                return
+            
+            # Show results dialog
+            results_dialog = NestingResultsDialog(self.root, results, self.theme)
+            self.root.wait_window(results_dialog)
+            
+            # Check if user wants to create pages from results
+            if hasattr(results_dialog, 'result') and results_dialog.result == "create_pages":
+                self._create_pages_from_nesting(results)
+            
+            self.status_var.set("Nesting completed")
+            
+        except Exception as e:
+            messagebox.showerror("Nesting Error", f"An error occurred during nesting:\n{str(e)}")
+            self.status_var.set("Nesting failed")
+            import traceback
+            traceback.print_exc()
+    
+    def _create_pages_from_nesting(self, results: Dict):
+        """Create new pages from nesting results."""
+        count = 0
+        for material_key, sheets in results.items():
+            for sheet in sheets:
+                # Render the sheet
+                rendered = sheet.render(include_masks=True)
+                
+                # Convert BGRA to BGR for page
+                bgr = cv2.cvtColor(rendered, cv2.COLOR_BGRA2BGR)
+                
+                # Create new page
+                page = PageTab(
+                    tab_id=str(uuid.uuid4())[:8],
+                    model_name=self.model_name or "Nested",
+                    page_name=sheet.sheet_name,
+                    original_image=bgr,
+                    active=True
+                )
+                
+                self.pages[page.tab_id] = page
+                self._add_page(page)
+                count += 1
+        
+        if count > 0:
+            messagebox.showinfo("Pages Created", f"Created {count} new pages from nesting results.")
+            self.workspace_modified = True
+    
+    def _scan_for_labels(self):
+        """Scan pages for component labels using OCR."""
+        page = self._get_current_page()
+        if not page:
+            messagebox.showwarning("No Page", "No page selected.")
+            return
+        
+        dialog = LabelScanDialog(self.root, [page.original_image], self.theme)
+        self.root.wait_window(dialog)
+        
+        if dialog.result:
+            # Create categories/objects from found labels
+            self.status_var.set(f"Found labels: {dialog.result}")
     
     def _detect_text_regions(self, page: PageTab) -> list:
         """Detect text regions in image using OCR and return list of regions."""
@@ -2953,6 +3108,18 @@ class SegmenterApp:
         if not (0 <= x < w and 0 <= y < h):
             return
         
+        # Handle object movement start
+        if self.is_moving_objects:
+            self.object_move_start = (x, y)
+            self.object_move_offset = (0, 0)
+            return
+        
+        # Handle pixel movement start
+        if self.is_moving_pixels:
+            self.pixel_move_start = (x, y)
+            self.pixel_move_offset = (0, 0)
+            return
+        
         if self.current_mode == "select":
             self._select_at(x, y)
         elif self.current_mode == "flood":
@@ -3363,6 +3530,10 @@ class SegmenterApp:
         
         # For other categories, use simple line mask
         mask = self.engine.create_line_mask((h, w), self.current_points)
+        
+        # Debug: Check mask creation
+        pixel_count = np.sum(mask > 0)
+        print(f"DEBUG LINE: Created line mask with {pixel_count} pixels from {len(self.current_points)} points")
         
         # Handle special marker categories
         if cat_name == "mark_text":
@@ -3808,8 +3979,9 @@ class SegmenterApp:
         
         if len(scaled) > 1:
             for i in range(len(scaled) - 1):
+                # Use dark color for visibility on white paper
                 page.canvas.create_line(scaled[i][0], scaled[i][1], scaled[i+1][0], scaled[i+1][1],
-                                        fill="yellow", width=2, tags="temp")
+                                        fill="#333333", width=2, tags="temp")
     
     def _redraw_rectangle(self):
         """Draw rectangle preview on canvas."""
@@ -4249,6 +4421,104 @@ class SegmenterApp:
             
             self.status_var.set(f"Created {cat_name} object from rectangle selection")
     
+    def _create_combined_object_from_masks(self, page: PageTab, cat_name: str, 
+                                          all_masks: List[np.ndarray], selected_indices: List[int]):
+        """
+        Create a single combined object from multiple selected masks.
+        
+        The combined object has an outer boundary (union of all masks) and can have
+        exclusion regions for objects that are completely nested inside others.
+        
+        Args:
+            page: The page to create the object on
+            cat_name: Category name for the object
+            all_masks: List of all detected masks
+            selected_indices: Indices of masks to combine
+        """
+        if not selected_indices or len(selected_indices) < 2:
+            return
+        
+        cat = self.categories.get(cat_name)
+        if not cat:
+            return
+        
+        h, w = page.original_image.shape[:2]
+        
+        # Get selected masks
+        selected_masks = []
+        for idx in selected_indices:
+            if 0 <= idx < len(all_masks):
+                mask = all_masks[idx]
+                if mask.shape == (h, w):
+                    selected_masks.append(mask)
+        
+        if not selected_masks:
+            return
+        
+        # Create outer boundary: union of all selected masks
+        combined_mask = np.zeros((h, w), dtype=np.uint8)
+        for mask in selected_masks:
+            combined_mask = np.maximum(combined_mask, mask)
+        
+        # Detect nested objects (objects completely inside other objects) for exclusions
+        # An object is nested if all its pixels are within another object's mask
+        exclusion_masks = []
+        
+        for i, mask_i in enumerate(selected_masks):
+            mask_i_pixels = np.sum(mask_i > 0)
+            if mask_i_pixels == 0:
+                continue
+            
+            # Check if this mask is completely inside any other mask
+            is_nested = False
+            for j, mask_j in enumerate(selected_masks):
+                if i == j:
+                    continue
+                
+                # Check if all pixels of mask_i are within mask_j
+                overlap = np.sum((mask_i > 0) & (mask_j > 0))
+                if overlap == mask_i_pixels:
+                    # mask_i is completely inside mask_j - it's an exclusion
+                    is_nested = True
+                    break
+            
+            if is_nested:
+                exclusion_masks.append(mask_i)
+        
+        # Start with union of all masks as outer boundary
+        final_mask = combined_mask.copy()
+        
+        # Subtract nested objects (exclusions) from the outer boundary
+        for exclusion_mask in exclusion_masks:
+            final_mask = np.maximum(0, final_mask.astype(np.int16) - exclusion_mask.astype(np.int16)).astype(np.uint8)
+        
+        # For mark_line, use _add_manual_line_region
+        if cat_name == "mark_line":
+            self._add_manual_line_region(page, final_mask, [], "rect_combined")
+        else:
+            # Generate element ID
+            element_id = f"{cat_name}_combined_{uuid.uuid4().hex[:8]}"
+            
+            # Create element with combined mask
+            elem = SegmentElement(
+                element_id=element_id,
+                category=cat_name,
+                mode="rect_combined",  # Mark as created via combined rectangle selection
+                points=[],  # No points for rectangle-selected objects
+                mask=final_mask,
+                color=cat.color_rgb,
+                label_position=self.label_position
+            )
+            
+            # Add to category using existing _add_element method
+            self._add_element(elem)
+        
+        exclusion_count = len(exclusion_masks)
+        if exclusion_count > 0:
+            self.status_var.set(f"Created combined {cat_name} object with {exclusion_count} exclusion region(s)")
+        else:
+            self.status_var.set(f"Created combined {cat_name} object from {len(selected_masks)} selections")
+    
     def _show_rectangle_selection_dialog(self, page: PageTab, cat_name: str, 
                                         detected_masks: List[np.ndarray],
                                         x_min: int, y_min: int, x_max: int, y_max: int):
@@ -4271,12 +4541,17 @@ class SegmenterApp:
         )
         
         if dialog.result:
-            # Create objects for selected masks
-            for idx in dialog.result:
-                if 0 <= idx < len(detected_masks):
-                    self._create_object_from_mask(page, cat_name, detected_masks[idx])
-            
-            self.status_var.set(f"Created {len(dialog.result)} {cat_name} object(s)")
+            if dialog.create_combined:
+                # Create a single combined object from all selected masks
+                self._create_combined_object_from_masks(page, cat_name, detected_masks, dialog.result)
+                self.status_var.set(f"Created 1 combined {cat_name} object from {len(dialog.result)} selections")
+            else:
+                # Create separate objects for each selected mask
+                for idx in dialog.result:
+                    if 0 <= idx < len(detected_masks):
+                        self._create_object_from_mask(page, cat_name, detected_masks[idx])
+                
+                self.status_var.set(f"Created {len(dialog.result)} {cat_name} object(s)")
             self._update_display()
     
     # Tree management
@@ -4758,9 +5033,13 @@ class SegmenterApp:
                            state="normal" if num_objects == 1 else "disabled")
             menu.add_command(label="Move", command=self._start_move_objects,
                            state="normal" if num_objects >= 1 else "disabled")
+            menu.add_command(label="Move to Page", command=self._move_object_to_page,
+                           state="normal" if num_objects >= 1 else "disabled")
             menu.add_command(label="Rename", command=lambda: self._start_inline_edit(f"o_{next(iter(self.selected_object_ids))}") if self.selected_object_ids else None,
                            state="normal" if num_objects == 1 else "disabled")
             menu.add_command(label="Edit Attributes", command=self._edit_attributes)
+            menu.add_command(label="Draw Perimeter", command=self._draw_perimeter,
+                           state="normal" if num_objects == 1 else "disabled")
             menu.add_separator()
             
             # Merge options
@@ -4778,6 +5057,7 @@ class SegmenterApp:
         # Instance actions (when instance is selected but not through object menu)
         elif num_instances >= 1 and num_objects == 0:
             menu.add_command(label="Move", command=self._start_move_objects)
+            menu.add_command(label="Move to Page", command=self._move_instance_to_page)
             menu.add_command(label="Edit Attributes", command=self._edit_attributes)
             menu.add_separator()
         
@@ -5167,6 +5447,297 @@ class SegmenterApp:
         for idx, inst in enumerate(obj.instances):
             inst.instance_num = idx + 1
     
+    def _move_object_to_page(self):
+        """Move selected object(s) to a different page."""
+        if not self.selected_object_ids:
+            return
+        
+        current_page = self._get_current_page()
+        if not current_page:
+            messagebox.showwarning("No Page", "No current page selected.")
+            return
+        
+        # Show page selection dialog
+        dialog = PageSelectionDialog(self.root, self.pages, current_page.tab_id, self.theme)
+        
+        if dialog.result is None:
+            # User cancelled
+            return
+        
+        target_page_id = dialog.result
+        target_page = self.pages.get(target_page_id)
+        
+        if not target_page:
+            messagebox.showerror("Error", "Target page not found.")
+            return
+        
+        if target_page_id == current_page.tab_id:
+            messagebox.showinfo("Info", "Object is already on this page.")
+            return
+        
+        # Get dimensions for both pages to handle resizing if needed
+        src_h, src_w = current_page.original_image.shape[:2]
+        dst_h, dst_w = target_page.original_image.shape[:2]
+        needs_resize = (src_h != dst_h) or (src_w != dst_w)
+        
+        # Move instances of selected objects to the target page
+        moved_count = 0
+        for obj_id in self.selected_object_ids:
+            obj = self._get_object_by_id(obj_id)
+            if not obj:
+                continue
+            
+            # Find instances on the current page and move them to target page
+            for inst in obj.instances:
+                if inst.page_id == current_page.tab_id:
+                    # Update page ID
+                    inst.page_id = target_page_id
+                    
+                    # Resize masks if pages have different dimensions
+                    if needs_resize:
+                        for elem in inst.elements:
+                            if elem.mask is not None and elem.mask.shape == (src_h, src_w):
+                                # Resize mask to fit target page
+                                elem.mask = cv2.resize(elem.mask, (dst_w, dst_h), interpolation=cv2.INTER_NEAREST)
+                            # Also adjust points if they exist
+                            if elem.points:
+                                scale_x = dst_w / src_w
+                                scale_y = dst_h / src_h
+                                elem.points = [(int(px * scale_x), int(py * scale_y)) for px, py in elem.points]
+                    
+                    moved_count += 1
+        
+        if moved_count > 0:
+            self.workspace_modified = True
+            self.renderer.invalidate_cache()
+            
+            # Update tree to reflect changes
+            self._update_tree()
+            
+            # Switch to target page to show moved objects
+            self._switch_to_page(target_page_id)
+            
+            # Update display after page switch
+            self._update_display()
+            
+            # Start move mode so user can position the moved objects
+            # Keep the same selection (objects are still selected)
+            self._start_move_objects()
+            self.status_var.set(f"Moved {moved_count} instance(s) to {target_page.display_name} - Click and drag to position, or press Escape to cancel")
+        else:
+            messagebox.showinfo("Info", "No instances found on current page to move.")
+    
+    def _move_instance_to_page(self):
+        """Move selected instance(s) to a different page."""
+        if not self.selected_instance_ids:
+            return
+        
+        current_page = self._get_current_page()
+        if not current_page:
+            messagebox.showwarning("No Page", "No current page selected.")
+            return
+        
+        # Show page selection dialog
+        dialog = PageSelectionDialog(self.root, self.pages, current_page.tab_id, self.theme)
+        
+        if dialog.result is None:
+            # User cancelled
+            return
+        
+        target_page_id = dialog.result
+        target_page = self.pages.get(target_page_id)
+        
+        if not target_page:
+            messagebox.showerror("Error", "Target page not found.")
+            return
+        
+        if target_page_id == current_page.tab_id:
+            messagebox.showinfo("Info", "Instance is already on this page.")
+            return
+        
+        # Get dimensions for both pages to handle resizing if needed
+        src_h, src_w = current_page.original_image.shape[:2]
+        dst_h, dst_w = target_page.original_image.shape[:2]
+        needs_resize = (src_h != dst_h) or (src_w != dst_w)
+        
+        # Move selected instances to the target page
+        moved_count = 0
+        for inst_id in self.selected_instance_ids:
+            for obj in self.all_objects:
+                for inst in obj.instances:
+                    if inst.instance_id == inst_id and inst.page_id == current_page.tab_id:
+                        # Update page ID
+                        inst.page_id = target_page_id
+                        
+                        # Resize masks if pages have different dimensions
+                        if needs_resize:
+                            for elem in inst.elements:
+                                if elem.mask is not None and elem.mask.shape == (src_h, src_w):
+                                    # Resize mask to fit target page
+                                    elem.mask = cv2.resize(elem.mask, (dst_w, dst_h), interpolation=cv2.INTER_NEAREST)
+                                # Also adjust points if they exist
+                                if elem.points:
+                                    scale_x = dst_w / src_w
+                                    scale_y = dst_h / src_h
+                                    elem.points = [(int(px * scale_x), int(py * scale_y)) for px, py in elem.points]
+                        
+                        moved_count += 1
+                        break
+        
+        if moved_count > 0:
+            self.workspace_modified = True
+            self.renderer.invalidate_cache()
+            
+            # Update tree to reflect changes
+            self._update_tree()
+            
+            # Switch to target page to show moved instances
+            self._switch_to_page(target_page_id)
+            
+            # Update display after page switch
+            self._update_display()
+            
+            # Start move mode so user can position the moved instances
+            # Keep the same selection (instances are still selected)
+            self._start_move_objects()
+            self.status_var.set(f"Moved {moved_count} instance(s) to {target_page.display_name} - Click and drag to position, or press Escape to cancel")
+        else:
+            messagebox.showinfo("Info", "No instances found on current page to move.")
+    
+    def _draw_perimeter(self):
+        """Draw a line around the perimeter of the selected object."""
+        if not self.selected_object_ids or len(self.selected_object_ids) != 1:
+            return
+        
+        page = self._get_current_page()
+        if not page:
+            return
+        
+        obj_id = next(iter(self.selected_object_ids))
+        obj = self._get_object_by_id(obj_id)
+        if not obj:
+            return
+        
+        h, w = page.original_image.shape[:2]
+        
+        # Get combined mask of all elements on current page
+        combined_mask = np.zeros((h, w), dtype=np.uint8)
+        for inst in obj.instances:
+            if inst.page_id == page.tab_id:
+                for elem in inst.elements:
+                    if elem.mask is not None and elem.mask.shape == (h, w):
+                        combined_mask = np.maximum(combined_mask, elem.mask)
+        
+        if np.sum(combined_mask > 0) == 0:
+            messagebox.showinfo("Info", "Object has no mask on current page.")
+            return
+        
+        # Find the contour of the mask
+        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            messagebox.showinfo("Info", "Could not find perimeter contour.")
+            return
+        
+        # Use the largest contour (in case there are multiple)
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        # Convert contour to points list [(x, y), ...]
+        # Contour is in shape (N, 1, 2), we need to reshape to (N, 2) and convert to list
+        contour_points = largest_contour.reshape(-1, 2).tolist()
+        # Convert from numpy int32 to Python int
+        points = [(int(p[0]), int(p[1])) for p in contour_points]
+        
+        # Calculate average line thickness from category's line elements
+        # Look for line elements in the same category
+        line_thickness = self.engine.line_thickness  # Default
+        thicknesses = []
+        
+        for other_obj in self.all_objects:
+            if other_obj.category == obj.category:
+                for other_inst in other_obj.instances:
+                    for other_elem in other_inst.elements:
+                        # If it's a line element, try to estimate thickness from mask
+                        if other_elem.mode in ["line", "polyline"] and other_elem.mask is not None:
+                            # Estimate thickness by finding average width of line mask
+                            mask = other_elem.mask
+                            if mask.shape == (h, w):
+                                # Find contours and measure thickness
+                                line_contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                                if line_contours:
+                                    # Use bounding box width as approximation
+                                    x, y, w_box, h_box = cv2.boundingRect(line_contours[0])
+                                    # For lines, thickness is usually the smaller dimension
+                                    thickness = min(w_box, h_box)
+                                    if thickness > 0:
+                                        thicknesses.append(thickness)
+        
+        if thicknesses:
+            line_thickness = int(np.mean(thicknesses))
+            # Ensure reasonable bounds
+            line_thickness = max(1, min(line_thickness, 20))
+        
+        # Get category color
+        cat = self.categories.get(obj.category)
+        if not cat:
+            return
+        
+        # Create a line mask for the perimeter that lies INSIDE the object
+        # We'll use morphological erosion to create an inner border
+        # This ensures the perimeter is visible (drawn on dark object pixels, not white background)
+        
+        # Ensure minimum thickness of 2 for visibility
+        line_thickness = max(2, line_thickness)
+        
+        # Method: Create inner perimeter by finding the difference between
+        # the original mask and an eroded version of it
+        erode_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (line_thickness, line_thickness))
+        eroded_mask = cv2.erode(combined_mask, erode_kernel, iterations=1)
+        
+        # The perimeter is the original mask minus the eroded mask
+        line_mask = cv2.subtract(combined_mask, eroded_mask)
+        
+        # Check if perimeter mask has content
+        perimeter_pixels = np.sum(line_mask > 0)
+        if perimeter_pixels == 0:
+            messagebox.showinfo("Info", "Could not create perimeter - object may be too small or thin.")
+            return
+        
+        # Store the points for reference (contour points)
+        if len(points) > 2 and points[0] != points[-1]:
+            points = points + [points[0]]
+        
+        # Create a new line element
+        elem = SegmentElement(
+            category=obj.category,
+            mode="perimeter",
+            points=points,
+            mask=line_mask,
+            color=cat.color_rgb,
+            label_position=self.label_position
+        )
+        
+        # Add to the last instance on current page, or create new instance if none exists
+        target_inst = None
+        for inst in obj.instances:
+            if inst.page_id == page.tab_id:
+                target_inst = inst
+                break
+        
+        if target_inst is None:
+            # Create new instance on current page
+            target_inst = obj.add_instance("", page.tab_id)
+            self._renumber_instances(obj)
+        
+        # Add element to instance
+        target_inst.elements.append(elem)
+        
+        self.workspace_modified = True
+        self.renderer.invalidate_cache()
+        self._update_tree_item(obj)
+        self._update_display()
+        self.status_var.set(f"Added perimeter line to {obj.name}")
+    
     def _edit_attributes(self):
         """Edit attributes for selected instance (or first instance of selected object)."""
         page = self._get_current_page()
@@ -5277,13 +5848,17 @@ class SegmenterApp:
         self.workspace_modified = True
         self.renderer.invalidate_cache()
         self._add_tree_item(new_obj)
-        self._update_display()
         
         # Select the new object
         self.selected_object_ids = {new_obj.object_id}
+        self.selected_instance_ids.clear()
+        self.selected_element_ids.clear()
         self._update_tree()
         self._update_display()
-        self.status_var.set(f"Duplicated {obj.name} ({total_elements} elements)")
+        
+        # Start move mode so user can position the duplicate
+        self._start_move_objects()
+        self.status_var.set(f"Duplicated {obj.name} - Click and drag to position, or press Escape to cancel")
     
     def _duplicate_selected(self):
         """Duplicate selected objects or elements."""
@@ -5351,8 +5926,21 @@ class SegmenterApp:
         self.renderer.invalidate_cache()
         for obj in new_objects:
             self._add_tree_item(obj)
-        self._update_display()
-        self.status_var.set(f"Duplicated {len(new_objects)} element(s)")
+        
+        # Select the new objects and start move mode
+        if new_objects:
+            self.selected_object_ids = {obj.object_id for obj in new_objects}
+            self.selected_instance_ids.clear()
+            self.selected_element_ids.clear()
+            self._update_tree()
+            self._update_display()
+            
+            # Start move mode so user can position the duplicates
+            self._start_move_objects()
+            self.status_var.set(f"Duplicated {len(new_objects)} element(s) - Click and drag to position, or press Escape to cancel")
+        else:
+            self._update_display()
+            self.status_var.set(f"Duplicated {len(new_objects)} element(s)")
     
     # Pixel selection and editing functions
     def _set_pixel_selection(self, mask: np.ndarray):
@@ -5586,23 +6174,59 @@ class SegmenterApp:
             label_position=self.label_position
         )
         
-        # Add as new object
-        self._add_element(elem)
+        # Create new object manually so we can select it
+        prefix = cat.prefix if cat else cat_name[0].upper()
+        count = sum(1 for o in self.all_objects if o.category == cat_name) + 1
+        
+        current_view = getattr(self, 'current_view_var', None)
+        view_type = current_view.get() if current_view else ""
+        
+        new_obj = SegmentedObject(name=f"{prefix}{count}", category=cat_name)
+        inst = ObjectInstance(instance_num=1, page_id=page.tab_id, view_type=view_type)
+        inst.elements.append(elem)
+        new_obj.instances.append(inst)
+        self.all_objects.append(new_obj)
+        
+        self.workspace_modified = True
+        self.renderer.invalidate_cache()
+        self._add_tree_item(new_obj)
         
         # Clear pixel selection
         self._clear_pixel_selection()
-        self.status_var.set("Duplicated pixels as new object")
+        
+        # Select the new object and start move mode
+        self.selected_object_ids = {new_obj.object_id}
+        self.selected_instance_ids.clear()
+        self.selected_element_ids.clear()
+        self._update_tree()
+        self._update_display()
+        
+        # Start move mode so user can position the duplicate
+        self._start_move_objects()
+        self.status_var.set("Duplicated pixels as new object - Click and drag to position, or press Escape to cancel")
     
     def _start_move_objects(self):
         """Start moving selected objects/elements."""
         if not (self.selected_object_ids or self.selected_instance_ids or self.selected_element_ids):
             return
         
+        # Switch to select mode so click/drag works properly
+        self.current_mode = "select"
+        self.mode_var.set("select")
+        
         self.is_moving_objects = True
+        self.object_move_start = None  # Will be set on first click
+        self.object_move_offset = None
+        
         page = self._get_current_page()
         if page and hasattr(page, 'canvas'):
             page.canvas.config(cursor="fleur")
-        self.status_var.set("Click and drag to move selected objects. Right-click to cancel.")
+            # Focus the canvas so it receives mouse events
+            page.canvas.focus_set()
+            
+        # Update the display to show the selection
+        self._update_display()
+        self.status_var.set("Click and drag to move selected objects. Right-click or Escape to cancel.")
     
     def _finish_move_objects(self, offset_x: int, offset_y: int):
         """Finish moving objects/elements by applying the offset."""
@@ -5792,7 +6416,121 @@ class SegmenterApp:
         self.object_move_start = None
         self.object_move_offset = None
     
+    def _delete_pixels_from_objects(self, objects_to_delete, instances_to_delete, elements_to_delete):
+        """
+        Delete pixels from original_image for the given objects/instances/elements.
+        Sets pixels in mask areas to white.
+        """
+        # Group masks by page
+        page_masks = {}  # page_id -> list of masks
+        
+        # Collect masks from objects to delete
+        for obj in objects_to_delete:
+            for inst in obj.instances:
+                page_id = inst.page_id
+                if page_id not in page_masks:
+                    page_masks[page_id] = []
+                
+                for elem in inst.elements:
+                    if elem.mask is not None:
+                        page_masks[page_id].append(elem.mask)
+        
+        # Collect masks from instances to delete
+        for obj, inst in instances_to_delete:
+            page_id = inst.page_id
+            if page_id not in page_masks:
+                page_masks[page_id] = []
+            
+            for elem in inst.elements:
+                if elem.mask is not None:
+                    page_masks[page_id].append(elem.mask)
+        
+        # Collect masks from elements to delete
+        for obj, inst, elem in elements_to_delete:
+            page_id = inst.page_id
+            if page_id not in page_masks:
+                page_masks[page_id] = []
+            
+            if elem.mask is not None:
+                page_masks[page_id].append(elem.mask)
+        
+        # For each page, combine masks and delete pixels
+        for page_id, masks in page_masks.items():
+            page = self.pages.get(page_id)
+            if not page or page.original_image is None:
+                continue
+            
+            h, w = page.original_image.shape[:2]
+            
+            # Combine all masks for this page
+            combined_mask = np.zeros((h, w), dtype=np.uint8)
+            for mask in masks:
+                if mask is not None and mask.shape == (h, w):
+                    combined_mask = np.maximum(combined_mask, mask)
+            
+            # Set pixels to white where mask is active
+            if np.any(combined_mask > 0):
+                if len(page.original_image.shape) == 3:
+                    # BGR image
+                    mask_3channel = cv2.cvtColor(combined_mask, cv2.COLOR_GRAY2BGR)
+                    page.original_image[mask_3channel > 0] = [255, 255, 255]
+                else:
+                    # Grayscale image
+                    page.original_image[combined_mask > 0] = 255
+                
+                # Invalidate cache for this page since original_image changed
+                self.renderer.invalidate_cache()
+                print(f"DEBUG: Deleted pixels from page {page_id} (mask size: {np.sum(combined_mask > 0)} pixels)")
+    
     def _delete_selected(self):
+        # First, collect all objects/elements that will be deleted and their masks
+        # to show dialog and handle pixel deletion if needed
+        objects_to_delete = []
+        elements_to_delete = []
+        instances_to_delete = []
+        
+        # Collect objects to delete
+        for obj_id in self.selected_object_ids:
+            obj = self._get_object_by_id(obj_id)
+            if obj:
+                objects_to_delete.append(obj)
+        
+        # Collect instances to delete
+        for inst_id in self.selected_instance_ids:
+            for obj in self.all_objects:
+                for inst in obj.instances:
+                    if inst.instance_id == inst_id:
+                        instances_to_delete.append((obj, inst))
+        
+        # Collect elements to delete
+        for elem_id in self.selected_element_ids:
+            for obj in self.all_objects:
+                for inst in obj.instances:
+                    for elem in inst.elements:
+                        if elem.element_id == elem_id:
+                            elements_to_delete.append((obj, inst, elem))
+        
+        # Count total items to delete
+        total_count = len(objects_to_delete) + len(instances_to_delete) + len(elements_to_delete)
+        
+        # Show dialog if there are items to delete
+        if total_count == 0:
+            return
+        
+        # Show deletion dialog
+        dialog = DeleteObjectDialog(self.root, total_count, self.theme)
+        
+        if dialog.result is None:
+            # User cancelled
+            return
+        
+        pixel_action = dialog.result  # "delete_pixels" or "revert_pixels"
+        
+        # If "delete_pixels", collect all masks and delete pixels from original_image
+        if pixel_action == "delete_pixels":
+            self._delete_pixels_from_objects(objects_to_delete, instances_to_delete, elements_to_delete)
+        
+        # Now proceed with normal deletion logic
         modified_objs = set()
         deleted_objs = set()
         page_ids_to_update = set()  # Track page IDs that need mask updates (use IDs since PageTab is not hashable)

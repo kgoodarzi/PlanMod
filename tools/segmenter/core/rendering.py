@@ -209,19 +209,30 @@ class Renderer:
             opacity = planform_opacity if obj.category == "planform" else 0.7
             alpha_val = int(255 * opacity)
             
-            # Collect all element masks for this object
-            obj_mask = np.zeros((h, w), dtype=np.uint8)
+            # Separate line/perimeter elements from filled elements
+            filled_mask = np.zeros((h, w), dtype=np.uint8)
+            line_elements = []  # Store line/perimeter elements for special rendering
+            
             for inst in obj.instances:
+                # Only process instances for the current page
+                if inst.page_id != page.tab_id:
+                    continue
+                    
                 for elem in inst.elements:
                     if elem.mask is not None and elem.mask.shape == (h, w):
-                        obj_mask = np.maximum(obj_mask, elem.mask)
+                        # Line and perimeter elements should be drawn as solid lines
+                        if elem.mode in ["line", "perimeter", "polyline"]:
+                            line_elements.append(elem)
+                        else:
+                            # Regular filled elements
+                            filled_mask = np.maximum(filled_mask, elem.mask)
             
             # Text ghosting fix: grow mask into text areas only
             # This fills gaps caused by text that was present during flood fill
-            if has_text_mask and np.any(obj_mask > 0):
+            if has_text_mask and np.any(filled_mask > 0):
                 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
                 # Use in-place operations where possible to reduce memory
-                grown_mask = obj_mask.copy()
+                grown_mask = filled_mask.copy()
                 
                 # Limit iterations to prevent excessive memory usage on large images
                 max_iterations = min(100, int(np.sqrt(h * w) / 10))  # Adaptive limit
@@ -233,14 +244,41 @@ class Renderer:
                         break
                     grown_mask[new_pixels] = 255
                 
-                obj_mask = grown_mask
+                filled_mask = grown_mask
             
-            # Apply to overlay
-            mask_region = obj_mask > 0
-            overlay[mask_region, 0] = cat.color_bgr[0]
-            overlay[mask_region, 1] = cat.color_bgr[1]
-            overlay[mask_region, 2] = cat.color_bgr[2]
-            overlay[mask_region, 3] = alpha_val
+            # Apply filled regions to overlay
+            if np.any(filled_mask > 0):
+                mask_region = filled_mask > 0
+                overlay[mask_region, 0] = cat.color_bgr[0]
+                overlay[mask_region, 1] = cat.color_bgr[1]
+                overlay[mask_region, 2] = cat.color_bgr[2]
+                overlay[mask_region, 3] = alpha_val
+            
+            # Draw line/perimeter elements as solid lines on top
+            # Use category color at full opacity for visibility
+            # IMPORTANT: Draw lines AFTER filled regions so they appear on top
+            for elem in line_elements:
+                if elem.mask is not None and elem.mask.shape == (h, w):
+                    line_region = elem.mask > 0
+                    pixel_count = np.sum(line_region)
+                    print(f"DEBUG RENDER LINE: {elem.mode} element for {obj.name}, {pixel_count} pixels, cat={obj.category}, color_bgr={cat.color_bgr}")
+                    if pixel_count > 0:
+                        # Get line color - use category color but ensure it's dark enough to be visible
+                        line_bgr = list(cat.color_bgr)
+                        
+                        # If color is too light (close to white), darken it for visibility
+                        brightness = (line_bgr[0] + line_bgr[1] + line_bgr[2]) / 3
+                        if brightness > 200:
+                            # Darken the color significantly
+                            line_bgr = [max(0, c - 150) for c in line_bgr]
+                        
+                        print(f"DEBUG RENDER LINE: Final color after brightness check: {line_bgr}")
+                        
+                        # Force line color and full opacity - this should overwrite filled regions
+                        overlay[line_region, 0] = line_bgr[0]
+                        overlay[line_region, 1] = line_bgr[1]
+                        overlay[line_region, 2] = line_bgr[2]
+                        overlay[line_region, 3] = 255  # Full opacity for lines
         
         if hide_background:
             # Show only objects on white background
@@ -263,17 +301,16 @@ class Renderer:
             # Blend overlay onto base image (which already has text/hatch hidden)
             base_rgba = cv2.cvtColor(base_image, cv2.COLOR_BGR2BGRA)
             alpha_channel = overlay[:, :, 3]  # Extract alpha as 2D array
-            # Optimized uint8 blending: result = base * (1 - alpha/255) + overlay * (alpha/255)
-            # = base - base * alpha/255 + overlay * alpha/255
-            # = base + (overlay - base) * alpha / 255
-            alpha_u16 = alpha_channel.astype(np.uint16)
+            # Blending formula: result = base * (1 - alpha/255) + overlay * (alpha/255)
+            # Use signed integers for the difference to handle dark-on-light correctly
+            alpha_i32 = alpha_channel.astype(np.int32)
             blended = base_rgba.copy()
             for c in range(3):
-                base_c = base_rgba[:, :, c].astype(np.uint16)
-                overlay_c = overlay[:, :, c].astype(np.uint16)
+                base_c = base_rgba[:, :, c].astype(np.int32)
+                overlay_c = overlay[:, :, c].astype(np.int32)
                 # result = base + (overlay - base) * alpha / 255
-                diff = overlay_c - base_c
-                result = base_c + (diff * alpha_u16 // 255)
+                diff = overlay_c - base_c  # Can be negative (e.g., dark line on white)
+                result = base_c + (diff * alpha_i32 // 255)
                 blended[:, :, c] = result.clip(0, 255).astype(np.uint8)
             blended[:, :, 3] = 255  # Full opacity
         

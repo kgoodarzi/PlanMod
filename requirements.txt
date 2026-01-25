@@ -45,6 +45,9 @@ aiofiles>=23.2.0
 structlog>=24.1.0
 tenacity>=8.2.0
 
+# Nesting/Packing
+rectpack>=0.2.2
+
 # AWS CDK (for infrastructure)
 aws-cdk-lib>=2.120.0
 constructs>=10.3.0
